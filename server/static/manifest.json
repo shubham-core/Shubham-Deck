@@ -1,0 +1,19 @@
+{
+  "name": "Shubham Deck",
+  "short_name": "Deck",
+  "description": "Touchscreen control deck for my Linux laptop",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#080808",
+  "theme_color": "#080808",
+  "icons": [
+    {
+      "src": "/static/icons/vscode.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
