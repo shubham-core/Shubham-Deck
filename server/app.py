@@ -965,6 +965,7 @@ HTML = r"""
 
     </style>
 
+    <link rel="stylesheet" href="/static/css/lumi.css">
 </head>
 
 
@@ -1002,7 +1003,7 @@ HTML = r"""
             </div>
 
             <div class="brand-text">
-                SHUBHAM DECK
+                <div id="lumi-container"><img id="lumi-avatar" src="/static/lumi/lumi-idle.svg" alt="Lumi"></div>SHUBHAM DECK
             </div>
 
         </div>
@@ -1825,6 +1826,7 @@ HTML = r"""
 </script>
 
 
+    <script src="/static/js/lumi.js"></script>
 </body>
 
 </html>
