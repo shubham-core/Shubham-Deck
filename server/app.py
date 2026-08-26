@@ -1,1958 +1,559 @@
-from flask import Flask, jsonify, render_template_string
-from pathlib import Path
-import subprocess
-import shutil
+import os
 import time
+import subprocess
+import cv2
+import psutil
+from flask import Flask, Response, jsonify, render_template_string, request
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 
-# ============================================================
-# PROJECT PATHS
-# ============================================================
+# Update with your phone's IP Camera URL
+CAMERA_URL = "http://10.124.165.12:8080/video"
 
-PROJECT_DIR = Path("/home/shubham/Desktop/Shubham-Deck")
-SCRIPTS_DIR = PROJECT_DIR / "scripts"
-
-# ============================================================
-# COMMAND REGISTRY
-# ============================================================
-
-COMMANDS = {
-    # Apps
-    "vscode": SCRIPTS_DIR / "vscode.sh",
-    "brave": SCRIPTS_DIR / "brave.sh",
-    "whatsapp": SCRIPTS_DIR / "whatsapp.sh",
-    "github": SCRIPTS_DIR / "github.sh",
-    "files": SCRIPTS_DIR / "files.sh",
-    "terminal": SCRIPTS_DIR / "terminal.sh",
-
-    # System
-    "mute": SCRIPTS_DIR / "mute.sh",
-    "volume-up": SCRIPTS_DIR / "volume-up.sh",
-    "volume-down": SCRIPTS_DIR / "volume-down.sh",
-    "lock": SCRIPTS_DIR / "lock.sh",
-    "screenshot": SCRIPTS_DIR / "screenshot.sh",
-}
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def read_cpu_usage():
-    """
-    Calculate CPU usage from /proc/stat without requiring
-    extra packages.
-    """
-    def sample():
-        with open("/proc/stat", "r", encoding="utf-8") as f:
-            line = f.readline()
-
-        values = list(map(int, line.split()[1:]))
-
-        user, nice, system, idle, iowait, irq, softirq, steal = values[:8]
-
-        idle_total = idle + iowait
-        total = sum(values)
-
-        return total, idle_total
-
-    total1, idle1 = sample()
-    time.sleep(0.12)
-    total2, idle2 = sample()
-
-    total_delta = total2 - total1
-    idle_delta = idle2 - idle1
-
-    if total_delta <= 0:
-        return 0.0
-
-    usage = (1 - (idle_delta / total_delta)) * 100
-
-    return round(max(0.0, min(100.0, usage)), 1)
-
-
-def read_memory():
-    """
-    Return RAM usage information from /proc/meminfo.
-    """
-    values = {}
-
-    with open("/proc/meminfo", "r", encoding="utf-8") as f:
-        for line in f:
-            key, value = line.split(":", 1)
-            values[key] = int(value.strip().split()[0])
-
-    total_kb = values.get("MemTotal", 0)
-    available_kb = values.get("MemAvailable", 0)
-
-    used_kb = total_kb - available_kb
-
-    if total_kb <= 0:
-        return {
-            "used_gb": 0,
-            "total_gb": 0,
-            "percent": 0,
-        }
-
-    used_gb = used_kb / 1024 / 1024
-    total_gb = total_kb / 1024 / 1024
-    percent = (used_kb / total_kb) * 100
-
-    return {
-        "used_gb": round(used_gb, 1),
-        "total_gb": round(total_gb, 1),
-        "percent": round(percent, 1),
-    }
-
-
-def read_disk():
-    """
-    Return root filesystem usage.
-    """
-    total, used, free = shutil.disk_usage("/")
-
-    total_gb = total / 1024 / 1024 / 1024
-    used_gb = used / 1024 / 1024 / 1024
-    free_gb = free / 1024 / 1024 / 1024
-
-    percent = (used / total) * 100 if total else 0
-
-    return {
-        "used_gb": round(used_gb, 1),
-        "total_gb": round(total_gb, 1),
-        "free_gb": round(free_gb, 1),
-        "percent": round(percent, 1),
-    }
-
-
-def read_temperature():
-    """
-    Try to obtain CPU temperature from lm-sensors/sysfs.
-    Returns None when unavailable.
-    """
-
-    # First try lm-sensors.
-    sensors = shutil.which("sensors")
-
-    if sensors:
-        try:
-            result = subprocess.run(
-                [sensors],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-
-            text = result.stdout
-
-            for line in text.splitlines():
-                if "Package id 0:" in line:
-                    parts = line.split()
-
-                    for part in parts:
-                        if part.endswith("°C"):
-                            cleaned = part.replace("+", "").replace("°C", "")
-                            try:
-                                return round(float(cleaned), 1)
-                            except ValueError:
-                                pass
-
-                if "Tctl:" in line or "Tdie:" in line:
-                    parts = line.split()
-
-                    for part in parts:
-                        if part.endswith("°C"):
-                            cleaned = part.replace("+", "").replace("°C", "")
-                            try:
-                                return round(float(cleaned), 1)
-                            except ValueError:
-                                pass
-
-        except Exception:
-            pass
-
-    # Fallback: thermal-zone files.
-    thermal_root = Path("/sys/class/thermal")
-
-    if thermal_root.exists():
-        for zone in thermal_root.glob("thermal_zone*/temp"):
-            try:
-                raw = int(zone.read_text().strip())
-                temp = raw / 1000
-
-                if -20 <= temp <= 120:
-                    return round(temp, 1)
-            except Exception:
-                continue
-
-    return None
-
-
-def read_uptime():
-    """
-    Read Linux uptime.
-    """
-    try:
-        seconds = float(
-            Path("/proc/uptime").read_text().split()[0]
-        )
-
-        seconds = int(seconds)
-
-        days, remainder = divmod(seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes, _ = divmod(remainder, 60)
-
-        if days:
-            return f"{days}d {hours}h {minutes}m"
-
-        if hours:
-            return f"{hours}h {minutes}m"
-
-        return f"{minutes}m"
-
-    except Exception:
-        return "Unknown"
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-HTML = r"""
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
-
 <head>
-
     <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="
-            width=device-width,
-            initial-scale=1,
-            maximum-scale=1,
-            user-scalable=no,
-            viewport-fit=cover
-        "
-    >
-
-    <meta name="theme-color" content="#070707">
-
-    <link
-        rel="manifest"
-        href="/static/manifest.json"
-    >
-
-    <title>Shubham Deck</title>
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Deck OS Command Center</title>
+    <!-- Your existing Lumi styles (will load if directory exists) -->
+    <link rel="stylesheet" href="/static/css/lumi.css">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-
-        /* ====================================================
-           RESET
-           ==================================================== */
-
-        * {
-            box-sizing: border-box;
-            -webkit-tap-highlight-color: transparent;
+        :root {
+            --bg: #020617;
+            --surface: rgba(15, 23, 42, 0.65);
+            --border: rgba(56, 189, 248, 0.2);
+            --accent: #38bdf8;
+            --danger: #ef4444;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --glow: 0 0 25px rgba(56, 189, 248, 0.15);
+            --font-ui: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
         }
 
-        html,
-        body {
-            margin: 0;
-            width: 100%;
-            height: 100%;
-
-            background:
-                radial-gradient(
-                    circle at 50% -10%,
-                    #202020 0,
-                    #0c0c0c 35%,
-                    #050505 100%
-                );
-
-            color: #fff;
-
-            font-family:
-                system-ui,
-                -apple-system,
-                BlinkMacSystemFont,
-                "Segoe UI",
-                sans-serif;
-
-            overflow: hidden;
-
-            touch-action: manipulation;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
         body {
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(2, 132, 199, 0.15), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(56, 189, 248, 0.1), transparent 25%);
+            color: var(--text);
+            font-family: var(--font-ui);
+            min-height: 100vh;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 20px;
+            overflow-x: hidden;
         }
 
-
-        /* ====================================================
-           DECK
-           ==================================================== */
-
-        .deck {
-            width: 100%;
-            height: 100%;
-
-            max-width: 1200px;
-
-            padding:
-                max(12px, env(safe-area-inset-top))
-                max(12px, env(safe-area-inset-right))
-                max(12px, env(safe-area-inset-bottom))
-                max(12px, env(safe-area-inset-left));
-
-            display: flex;
-            flex-direction: column;
+        @media (max-width: 1024px) {
+            body { grid-template-columns: 1fr; padding: 12px; gap: 16px; }
         }
 
-
-        /* ====================================================
-           TOP BAR
-           ==================================================== */
-
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-
-            min-height: 52px;
-
-            margin-bottom: 10px;
+        /* Glass & Containers */
+        .glass-panel {
+            background: var(--surface);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            box-shadow: var(--glow);
+            padding: 24px;
         }
+
+        /* Sidebar Elements */
+        .sidebar { display: flex; flex-direction: column; gap: 32px; }
 
         .brand {
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            display: flex; align-items: center; gap: 16px;
+            font-size: 1.4rem; font-weight: 800; letter-spacing: 2px;
         }
 
-        .brand-mark {
-            width: 36px;
-            height: 36px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            border-radius: 11px;
-
-            background:
-                linear-gradient(
-                    145deg,
-                    #353535,
-                    #181818
-                );
-
-            border: 1px solid #3c3c3c;
-
-            box-shadow:
-                inset 0 1px 0
-                    rgba(255,255,255,.08);
+        .badge {
+            background: rgba(56, 189, 248, 0.2); color: var(--accent);
+            padding: 2px 8px; border-radius: 8px; font-size: 0.7rem; font-weight: bold;
         }
 
-        .brand-text {
-            font-size: clamp(18px, 4vw, 28px);
-            font-weight: 850;
-            letter-spacing: .8px;
+        .lumi-avatar-wrapper {
+            width: 48px; height: 48px; background: rgba(0,0,0,0.3);
+            border-radius: 50%; border: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: center; overflow: hidden;
+        }
+        .lumi-avatar-wrapper img { width: 100%; height: 100%; object-fit: contain; }
+
+        /* Stats */
+        .stats-container { display: flex; flex-direction: column; gap: 20px; }
+        .stat-group { display: flex; flex-direction: column; gap: 8px; }
+        .stat-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; font-weight: 600; letter-spacing: 1px;}
+        .stat-value { color: var(--accent); font-family: var(--font-mono); }
+        .text-muted { color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+
+        .stat-bar-bg {
+            width: 100%; height: 6px; background: rgba(255,255,255,0.05);
+            border-radius: 4px; overflow: hidden;
+        }
+        .stat-bar-fill {
+            height: 100%; background: var(--accent); border-radius: 4px;
+            transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 0 10px var(--accent);
+        }
+        .text-muted-bg { background: var(--text-muted); box-shadow: none; }
+
+        /* Status Indicator */
+        .system-status { display: flex; flex-direction: column; gap: 12px; margin-top: auto; }
+        .status-indicator {
+            display: flex; align-items: center; gap: 10px;
+            font-size: 0.85rem; font-weight: 700; letter-spacing: 1px;
+            padding: 12px 16px; border-radius: 12px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05);
+        }
+        .status-indicator.online { color: #10b981; }
+        .status-indicator.offline { color: var(--danger); }
+        .status-indicator .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+
+        /* Main Content & Camera */
+        .main-content { display: flex; flex-direction: column; gap: 20px; }
+
+        .cam-wrapper {
+            position: relative; width: 100%; aspect-ratio: 16/9;
+            border-radius: 24px; overflow: hidden; padding: 0; background: #000; border: 1px solid var(--border);
+        }
+        #camera-feed { width: 100%; height: 100%; object-fit: cover; transition: opacity 0.3s; }
+
+        .camera-offline-state {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            background: #000; color: var(--danger); font-family: var(--font-mono);
+            letter-spacing: 2px; text-align: center; z-index: 5;
+        }
+        .hidden { display: none !important; }
+
+        /* HUD */
+        .hud {
+            position: absolute; inset: 0; pointer-events: none;
+            box-shadow: inset 0 0 80px rgba(0,0,0,0.8);
+            padding: 24px; display: flex; flex-direction: column; justify-content: space-between; z-index: 10;
+        }
+        .hud-top, .hud-bottom { display: flex; justify-content: space-between; align-items: flex-end; }
+        .hud-mono { font-family: var(--font-mono); color: rgba(255,255,255,0.7); font-size: 0.85rem; text-shadow: 0 2px 4px #000; }
+
+        .rec-indicator { display: flex; align-items: center; gap: 8px; color: #ef4444; font-family: var(--font-mono); font-weight: bold; font-size: 0.9rem; letter-spacing: 1px; text-shadow: 0 2px 4px #000;}
+        .rec-dot { width: 12px; height: 12px; background: #ef4444; border-radius: 50%; box-shadow: 0 0 10px #ef4444; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% {opacity:1;} 50% {opacity:0.3;} 100% {opacity:1;} }
+
+        .crosshair {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 60px; height: 60px; border: 1px solid rgba(255,255,255,0.2); border-radius: 50%;
+        }
+        .crosshair::before, .crosshair::after { content: ''; position: absolute; background: rgba(255,255,255,0.4); }
+        .crosshair::before { top: -20px; bottom: -20px; left: 29px; width: 1px; }
+        .crosshair::after { left: -20px; right: -20px; top: 29px; height: 1px; }
+
+        /* Buttons & Grid */
+        .section-title { font-size: 0.85rem; color: var(--text-muted); letter-spacing: 2px; margin-bottom: 16px; }
+        .btn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 16px; }
+        
+        .btn {
+            background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px 16px; border-radius: 16px; color: var(--text); font-size: 0.9rem; font-weight: 600;
+            cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
         }
 
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-
-            padding: 7px 10px;
-
-            border: 1px solid #252525;
-            border-radius: 999px;
-
-            background: rgba(20,20,20,.8);
-
-            color: #929292;
-
-            font-size: 10px;
-            font-weight: 800;
-
-            letter-spacing: .3px;
+        .btn:hover {
+            background: rgba(56, 189, 248, 0.1); border-color: var(--accent);
+            transform: translateY(-2px); box-shadow: 0 8px 20px rgba(56, 189, 248, 0.15);
         }
+        .btn:active { transform: translateY(1px); }
+        .btn i { color: var(--accent); transition: transform 0.2s; }
+        .btn:hover i { transform: scale(1.1); }
 
-        .status-dot {
-            width: 8px;
-            height: 8px;
+        .btn-danger { border-color: rgba(239, 68, 68, 0.3); }
+        .btn-danger:hover { background: rgba(239, 68, 68, 0.15); border-color: var(--danger); box-shadow: 0 8px 20px rgba(239, 68, 68, 0.15); }
+        .btn-danger i { color: var(--danger); }
+        
+        .btn-secondary { background: transparent; border-color: var(--text-muted); color: var(--text-muted); padding: 12px; }
+        .btn-secondary:hover { background: rgba(255,255,255,0.05); border-color: var(--text); color: var(--text); box-shadow: none;}
 
-            border-radius: 50%;
-
-            background: #38e58b;
-
-            box-shadow:
-                0 0 10px
-                rgba(56,229,139,.75);
+        /* Toasts & Modals */
+        #toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 12px; z-index: 1000; }
+        .toast {
+            background: rgba(15, 23, 42, 0.9); backdrop-filter: blur(10px); border-left: 4px solid var(--accent);
+            padding: 16px 24px; border-radius: 8px; color: #fff; font-weight: 500; font-size: 0.9rem;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5); transform: translateX(120%); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            display: flex; align-items: center; gap: 12px;
         }
+        .toast.show { transform: translateX(0); }
+        .toast.error { border-color: var(--danger); }
 
-
-        /* ====================================================
-           FULLSCREEN
-           ==================================================== */
-
-        #fullscreenBtn {
-            position: fixed;
-
-            top: max(
-                10px,
-                env(safe-area-inset-top)
-            );
-
-            right: max(
-                10px,
-                env(safe-area-inset-right)
-            );
-
-            z-index: 9999;
-
-            width: 44px;
-            height: 40px;
-
-            border: 1px solid #333;
-            border-radius: 12px;
-
-            background: rgba(30,30,30,.95);
-            color: white;
-
-            font-size: 20px;
-            font-weight: 800;
-
-            cursor: pointer;
-
-            box-shadow:
-                0 8px 24px rgba(0,0,0,.4);
-
-            backdrop-filter: blur(10px);
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px);
+            display: flex; align-items: center; justify-content: center; z-index: 2000;
+            opacity: 0; pointer-events: none; transition: opacity 0.2s;
         }
-
-        #fullscreenBtn:active {
-            transform: scale(.88);
-        }
-
-
-        /* ====================================================
-           NAVIGATION
-           ==================================================== */
-
-        .nav {
-            display: grid;
-
-            grid-template-columns:
-                repeat(3, 1fr);
-
-            gap: 7px;
-
-            margin-bottom: 10px;
-        }
-
-        .nav-btn {
-            height: 39px;
-
-            border: 1px solid #252525;
-            border-radius: 11px;
-
-            background: #111;
-
-            color: #777;
-
-            font-size: 11px;
-            font-weight: 850;
-
-            cursor: pointer;
-
-            transition:
-                background .12s ease,
-                color .12s ease,
-                transform .08s ease;
-        }
-
-        .nav-btn.active {
-            color: #fff;
-
-            background:
-                linear-gradient(
-                    145deg,
-                    #292929,
-                    #181818
-                );
-
-            border-color: #454545;
-        }
-
-        .nav-btn:active {
-            transform: scale(.96);
-        }
-
-
-        /* ====================================================
-           PAGE
-           ==================================================== */
-
-        .page {
-            display: none;
-
-            flex: 1;
-
-            min-height: 0;
-        }
-
-        .page.active {
-            display: flex;
-            flex-direction: column;
-        }
-
-
-        /* ====================================================
-           APP / SYSTEM GRID
-           ==================================================== */
-
-        .deck-grid {
-            flex: 1;
-            min-height: 0;
-
-            display: grid;
-
-            grid-template-columns:
-                repeat(3, minmax(0, 1fr));
-
-            grid-template-rows:
-                repeat(2, minmax(0, 1fr));
-
-            gap: 10px;
-        }
-
-
-        /* ====================================================
-           KEY
-           ==================================================== */
-
-        .key {
-            min-width: 0;
-            min-height: 0;
-
-            border: 1px solid #292929;
-            border-radius: 20px;
-
-            background:
-                radial-gradient(
-                    circle at 50% 0%,
-                    rgba(255,255,255,.07),
-                    transparent 42%
-                ),
-                linear-gradient(
-                    145deg,
-                    #191919,
-                    #101010
-                );
-
-            color: white;
-
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-
-            gap: 9px;
-
-            padding: 9px;
-
-            cursor: pointer;
-
-            box-shadow:
-                inset 0 1px 0
-                    rgba(255,255,255,.035),
-
-                0 7px 18px
-                    rgba(0,0,0,.27);
-
-            transition:
-                transform .09s ease,
-                background .09s ease,
-                border-color .09s ease;
-        }
-
-        .key:active,
-        .key.pressed {
-            transform: scale(.94);
-
-            border-color: #656565;
-
-            background:
-                radial-gradient(
-                    circle at 50% 30%,
-                    rgba(255,255,255,.13),
-                    transparent 50%
-                ),
-                #222;
-        }
-
-
-        /* ====================================================
-           APP ICON
-           ==================================================== */
-
-        .icon {
-            width:
-                clamp(48px, 9vw, 82px);
-
-            height:
-                clamp(48px, 9vw, 82px);
-
-            object-fit: contain;
-
-            pointer-events: none;
-            user-select: none;
-
-            filter:
-                drop-shadow(
-                    0 5px 10px
-                    rgba(0,0,0,.4)
-                );
-        }
-
-
-        /* ====================================================
-           EMOJI ICON
-           ==================================================== */
-
-        .emoji-icon {
-            font-size:
-                clamp(40px, 8vw, 68px);
-
-            line-height: 1;
-
-            pointer-events: none;
-            user-select: none;
-        }
-
-
-        /* ====================================================
-           LABEL
-           ==================================================== */
-
-        .label {
-            font-size:
-                clamp(11px, 2.15vw, 16px);
-
-            font-weight: 800;
-
-            line-height: 1.1;
-
-            text-align: center;
-
-            pointer-events: none;
-            user-select: none;
-        }
-
-
-        /* ====================================================
-           SYSTEM STATS
-           ==================================================== */
-
-        .stats-wrap {
-            flex: 1;
-
-            min-height: 0;
-
-            display: flex;
-            flex-direction: column;
-
-            gap: 10px;
-        }
-
-        .stats-grid {
-            display: grid;
-
-            grid-template-columns:
-                repeat(2, minmax(0, 1fr));
-
-            gap: 10px;
-
-            flex: 1;
-        }
-
-        .stat-card {
-            border: 1px solid #292929;
-            border-radius: 18px;
-
-            background:
-                linear-gradient(
-                    145deg,
-                    #191919,
-                    #101010
-                );
-
-            padding: 15px;
-
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-
-            min-height: 0;
-        }
-
-        .stat-head {
-            color: #777;
-
-            font-size: 10px;
-
-            font-weight: 850;
-
-            letter-spacing: 1px;
-        }
-
-        .stat-value {
-            font-size:
-                clamp(21px, 5vw, 36px);
-
-            font-weight: 850;
-        }
-
-        .stat-sub {
-            color: #777;
-
-            font-size: 10px;
-
-            font-weight: 700;
-        }
-
-        .meter {
-            width: 100%;
-            height: 7px;
-
-            border-radius: 99px;
-
-            overflow: hidden;
-
-            background: #252525;
-        }
-
-        .meter > span {
-            display: block;
-
-            height: 100%;
-
-            width: 0%;
-
-            background:
-                linear-gradient(
-                    90deg,
-                    #777,
-                    #ddd
-                );
-
-            border-radius: inherit;
-
-            transition:
-                width .35s ease;
-        }
-
-        .refresh-btn {
-            min-height: 43px;
-
-            border: 1px solid #303030;
-            border-radius: 13px;
-
-            background: #171717;
-
-            color: #fff;
-
-            font-weight: 850;
-
-            cursor: pointer;
-        }
-
-
-        /* ====================================================
-           AI VISION PAGE
-           ==================================================== */
-
-        .vision-shell {
-            flex: 1;
-
-            min-height: 0;
-
-            display: flex;
-            flex-direction: column;
-
-            gap: 10px;
-        }
-
-        .camera-panel {
-            position: relative;
-
-            flex: 1;
-
-            min-height: 0;
-
-            border:
-                1px solid #292929;
-
-            border-radius: 20px;
-
-            background:
-                radial-gradient(
-                    circle,
-                    #171717,
-                    #0b0b0b
-                );
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            overflow: hidden;
-        }
-
-        .camera-placeholder {
-            text-align: center;
-            color: #777;
-        }
-
-        .camera-icon {
-            font-size: 56px;
-            margin-bottom: 10px;
-        }
-
-        .camera-title {
-            color: #aaa;
-            font-weight: 850;
-        }
-
-        .camera-sub {
-            margin-top: 5px;
-            font-size: 11px;
-            color: #555;
-        }
-
-        .vision-controls {
-            display: grid;
-
-            grid-template-columns:
-                repeat(2, 1fr);
-
-            gap: 8px;
-        }
-
-        .vision-btn {
-            min-height: 43px;
-
-            border:
-                1px solid #2a2a2a;
-
-            border-radius: 13px;
-
-            background: #171717;
-
-            color: #fff;
-
-            font-weight: 800;
-
-            cursor: pointer;
-        }
-
-
-        /* ====================================================
-           TOAST
-           ==================================================== */
-
-        #toast {
-            position: fixed;
-
-            left: 50%;
-            bottom: 25px;
-
-            transform:
-                translateX(-50%);
-
-            z-index: 20000;
-
-            max-width: 88%;
-
-            padding:
-                10px
-                14px;
-
-            border:
-                1px solid #3a3a3a;
-
-            border-radius: 12px;
-
-            background:
-                rgba(25,25,25,.96);
-
-            color: #fff;
-
-            font-size: 12px;
-
-            font-weight: 750;
-
-            box-shadow:
-                0 10px 30px
-                rgba(0,0,0,.45);
-
-            opacity: 0;
-
-            pointer-events: none;
-
-            transition:
-                opacity .2s ease;
-        }
-
-
-        /* ====================================================
-           RESPONSIVE
-           ==================================================== */
-
-        @media (max-width: 600px) {
-
-            .deck-grid {
-                gap: 8px;
-            }
-
-            .key {
-                border-radius: 16px;
-            }
-
-            .stats-grid {
-                gap: 8px;
-            }
-
-            .stat-card {
-                border-radius: 15px;
-                padding: 12px;
-            }
-        }
-
-        @media (orientation: landscape) {
-
-            .deck {
-                max-width: 1200px;
-            }
-
-            .deck-grid {
-                gap: 9px;
-            }
-
-            .icon {
-                width:
-                    clamp(45px, 8vh, 75px);
-
-                height:
-                    clamp(45px, 8vh, 75px);
-            }
-
-            .emoji-icon {
-                font-size:
-                    clamp(38px, 7vh, 60px);
-            }
-        }
-
-
+        .modal-overlay.active { opacity: 1; pointer-events: auto; }
+        .modal-box { width: 90%; max-width: 400px; text-align: center; display: flex; flex-direction: column; gap: 16px; align-items: center; transform: translateY(20px); transition: transform 0.3s; }
+        .modal-overlay.active .modal-box { transform: translateY(0); }
+        .modal-actions { display: flex; gap: 16px; width: 100%; margin-top: 8px; }
+        .modal-actions .btn { flex: 1; padding: 12px; flex-direction: row; }
+
+        /* Utilities */
+        .icon-sm { width: 16px; height: 16px; }
+        .mt-4 { margin-top: 24px; }
+        .mt-3 { margin-top: 16px; }
+        .mt-auto { margin-top: auto; }
     </style>
-
-    <link rel="stylesheet" href="/static/css/lumi.css">
 </head>
-
-
 <body>
+    <div id="toast-container"></div>
 
+    <!-- Confirmation Modal -->
+    <div id="modal-overlay" class="modal-overlay">
+        <div class="modal-box glass-panel">
+            <i data-lucide="alert-triangle" style="color: var(--danger); width: 48px; height: 48px;"></i>
+            <h2 id="modal-title">Confirm Action</h2>
+            <p id="modal-message">Are you sure you want to proceed?</p>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-danger" id="modal-confirm-btn">Execute</button>
+            </div>
+        </div>
+    </div>
 
-<!-- ============================================================
-     FULLSCREEN BUTTON
-     ============================================================ -->
-
-<button
-    id="fullscreenBtn"
-    onclick="goFullscreen()"
-    aria-label="Enter fullscreen"
->
-    ⛶
-</button>
-
-
-<!-- ============================================================
-     MAIN
-     ============================================================ -->
-
-<main class="deck">
-
-
-    <!-- HEADER -->
-
-    <header class="topbar">
-
+    <aside class="sidebar glass-panel">
         <div class="brand">
-
-            <div class="brand-mark">
-                ⚡
+            <div id="lumi-container" class="lumi-avatar-wrapper">
+                <img id="lumi-avatar" src="/static/lumi/lumi-idle.svg" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'%2338bdf8\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\'><rect x=\'2\' y=\'2\' width=\'20\' height=\'8\' rx=\'2\' ry=\'2\'/><rect x=\'2\' y=\'14\' width=\'20\' height=\'8\' rx=\'2\' ry=\'2\'/><line x1=\'6\' y1=\'6\' x2=\'6.01\' y2=\'6\'/><line x1=\'6\' y1=\'18\' x2=\'6.01\' y2=\'18\'/></svg>'">
             </div>
-
-            <div class="brand-text">
-                <div id="lumi-container"><img id="lumi-avatar" src="/static/lumi/lumi-idle.svg" alt="Lumi"></div>SHUBHAM DECK
-            </div>
-
+            <span>DECK OS <span class="badge">PRO</span></span>
         </div>
-
-
-        <div class="status">
-
-            <span class="status-dot"></span>
-
-            ONLINE
-
-        </div>
-
-    </header>
-
-
-    <!-- ========================================================
-         NAV
-         ======================================================== -->
-
-    <nav class="nav">
-
-        <button
-            class="nav-btn active"
-            onclick="switchPage('apps', this)"
-        >
-            APPS
-        </button>
-
-        <button
-            class="nav-btn"
-            onclick="switchPage('system', this)"
-        >
-            SYSTEM
-        </button>
-
-        <button
-            class="nav-btn"
-            onclick="switchPage('vision', this)"
-        >
-            AI VISION
-        </button>
-
-    </nav>
-
-
-    <!-- ========================================================
-         APPS
-         ======================================================== -->
-
-    <section
-        id="apps"
-        class="page active"
-    >
-
-        <div class="deck-grid">
-
-
-            <button
-                class="key"
-                onclick="runCommand('vscode', this)"
-            >
-                <img
-                    class="icon"
-                    src="/static/icons/vscode.png"
-                    alt=""
-                >
-
-                <span class="label">
-                    VS Code
-                </span>
-            </button>
-
-
-            <button
-                class="key"
-                onclick="runCommand('brave', this)"
-            >
-                <img
-                    class="icon"
-                    src="/static/icons/brave.png"
-                    alt=""
-                >
-
-                <span class="label">
-                    Brave
-                </span>
-            </button>
-
-
-            <button
-                class="key"
-                onclick="runCommand('whatsapp', this)"
-            >
-                <img
-                    class="icon"
-                    src="/static/icons/whatsapp.ico"
-                    alt=""
-                >
-
-                <span class="label">
-                    WhatsApp
-                </span>
-            </button>
-
-
-            <button
-                class="key"
-                onclick="runCommand('github', this)"
-            >
-                <img
-                    class="icon"
-                    src="/static/icons/github.svg"
-                    alt=""
-                >
-
-                <span class="label">
-                    GitHub
-                </span>
-            </button>
-
-
-            <button
-                class="key"
-                onclick="runCommand('files', this)"
-            >
-                <img
-                    class="icon"
-                    src="/static/icons/files.svg"
-                    alt=""
-                >
-
-                <span class="label">
-                    Files
-                </span>
-            </button>
-
-
-            <button
-                class="key"
-                onclick="runCommand('terminal', this)"
-            >
-                <img
-                    class="icon"
-                    src="/static/icons/terminal.svg"
-                    alt=""
-                >
-
-                <span class="label">
-                    Terminal
-                </span>
-            </button>
-
-
-        </div>
-
-    </section>
-
-
-    <!-- ========================================================
-         SYSTEM
-         ======================================================== -->
-
-    <section
-        id="system"
-        class="page"
-    >
-
-        <div class="stats-wrap">
-
-
-            <!-- SYSTEM CONTROL BUTTONS -->
-
-            <div class="deck-grid">
-
-                <button
-                    class="key"
-                    onclick="runCommand('mute', this)"
-                >
-                    <span class="emoji-icon">
-                        🔇
-                    </span>
-
-                    <span class="label">
-                        Mute
-                    </span>
-                </button>
-
-
-                <button
-                    class="key"
-                    onclick="runCommand('volume-up', this)"
-                >
-                    <span class="emoji-icon">
-                        🔊
-                    </span>
-
-                    <span class="label">
-                        Volume +
-                    </span>
-                </button>
-
-
-                <button
-                    class="key"
-                    onclick="runCommand('volume-down', this)"
-                >
-                    <span class="emoji-icon">
-                        🔉
-                    </span>
-
-                    <span class="label">
-                        Volume -
-                    </span>
-                </button>
-
-
-                <button
-                    class="key"
-                    onclick="runCommand('lock', this)"
-                >
-                    <span class="emoji-icon">
-                        🔒
-                    </span>
-
-                    <span class="label">
-                        Lock
-                    </span>
-                </button>
-
-
-                <button
-                    class="key"
-                    onclick="runCommand('screenshot', this)"
-                >
-                    <span class="emoji-icon">
-                        📸
-                    </span>
-
-                    <span class="label">
-                        Screenshot
-                    </span>
-                </button>
-
-
-                <button
-                    class="key"
-                    onclick="loadStats()"
-                >
-                    <span class="emoji-icon">
-                        📊
-                    </span>
-
-                    <span class="label">
-                        Refresh Stats
-                    </span>
-                </button>
-
+        
+        <div class="stats-container">
+            <div class="stat-group">
+                <div class="stat-row">
+                    <span class="text-muted"><i data-lucide="cpu" class="icon-sm"></i> CPU LOAD</span>
+                    <span id="cpu-val" class="stat-value">0%</span>
+                </div>
+                <div class="stat-bar-bg"><div id="cpu-bar" class="stat-bar-fill"></div></div>
             </div>
 
-
-            <!-- LIVE STATS -->
-
-            <div class="stats-grid">
-
-
-                <div class="stat-card">
-
-                    <div class="stat-head">
-                        CPU
-                    </div>
-
-                    <div
-                        id="cpuValue"
-                        class="stat-value"
-                    >
-                        --
-                    </div>
-
-                    <div class="meter">
-                        <span
-                            id="cpuMeter"
-                        ></span>
-                    </div>
-
+            <div class="stat-group">
+                <div class="stat-row">
+                    <span class="text-muted"><i data-lucide="memory-stick" class="icon-sm"></i> MEMORY</span>
+                    <span id="ram-val" class="stat-value">0%</span>
                 </div>
-
-
-                <div class="stat-card">
-
-                    <div class="stat-head">
-                        RAM
-                    </div>
-
-                    <div
-                        id="ramValue"
-                        class="stat-value"
-                    >
-                        --
-                    </div>
-
-                    <div
-                        id="ramSub"
-                        class="stat-sub"
-                    >
-                        --
-                    </div>
-
-                    <div class="meter">
-                        <span
-                            id="ramMeter"
-                        ></span>
-                    </div>
-
-                </div>
-
-
-                <div class="stat-card">
-
-                    <div class="stat-head">
-                        CPU TEMP
-                    </div>
-
-                    <div
-                        id="tempValue"
-                        class="stat-value"
-                    >
-                        --
-                    </div>
-
-                    <div class="stat-sub">
-                        CPU temperature
-                    </div>
-
-                </div>
-
-
-                <div class="stat-card">
-
-                    <div class="stat-head">
-                        DISK
-                    </div>
-
-                    <div
-                        id="diskValue"
-                        class="stat-value"
-                    >
-                        --
-                    </div>
-
-                    <div
-                        id="diskSub"
-                        class="stat-sub"
-                    >
-                        --
-                    </div>
-
-                    <div class="meter">
-                        <span
-                            id="diskMeter"
-                        ></span>
-                    </div>
-
-                </div>
-
-
+                <div class="stat-bar-bg"><div id="ram-bar" class="stat-bar-fill"></div></div>
             </div>
 
+            <div class="stat-group">
+                <div class="stat-row">
+                    <span class="text-muted"><i data-lucide="hard-drive" class="icon-sm"></i> STORAGE</span>
+                    <span id="disk-val" class="stat-value">0%</span>
+                </div>
+                <div class="stat-bar-bg"><div id="disk-bar" class="stat-bar-fill text-muted-bg"></div></div>
+            </div>
         </div>
-
-    </section>
-
-
-    <!-- ========================================================
-         AI VISION
-         ======================================================== -->
-
-    <section
-        id="vision"
-        class="page"
-    >
-
-        <div class="vision-shell">
-
-
-            <div class="camera-panel">
-
-                <div class="camera-placeholder">
-
-                    <div class="camera-icon">
-                        📷
-                    </div>
-
-                    <div class="camera-title">
-                        AI VISION
-                    </div>
-
-                    <div class="camera-sub">
-                        Camera pipeline coming next
-                    </div>
-
-                </div>
-
+        
+        <div class="system-status">
+            <div class="status-indicator online" id="conn-status">
+                <div class="dot"></div>
+                <span id="conn-text">SYSTEM ONLINE</span>
             </div>
-
-
-            <div class="vision-controls">
-
-                <button
-                    class="vision-btn"
-                    onclick="showToast('Camera setup coming next')"
-                >
-                    START CAMERA
-                </button>
-
-                <button
-                    class="vision-btn"
-                    onclick="showToast('AI detection coming next')"
-                >
-                    OBJECT DETECTION
-                </button>
-
+            <div class="stat-row mt-auto">
+                <span class="text-muted">UPTIME</span>
+                <span id="uptime-val" class="stat-value">0h 0m</span>
             </div>
-
         </div>
-
-    </section>
-
-
-</main>
-
-
-<!-- TOAST -->
-
-<div id="toast"></div>
-
-
-<script>
-
-
-    // ========================================================
-    // RUN LAPTOP COMMAND
-    // ========================================================
-
-    async function runCommand(
-        name,
-        button
-    ) {
-
-        if (button) {
-
-            button.classList.add(
-                "pressed"
-            );
-
-            setTimeout(
-                () => {
-                    button.classList.remove(
-                        "pressed"
-                    );
-                },
-                140
-            );
-        }
-
-
-        try {
-
-            const response =
-                await fetch(
-                    "/run/" +
-                    encodeURIComponent(name),
-                    {
-                        method: "GET",
-                        cache: "no-store"
-                    }
-                );
-
-
-            const data =
-                await response.json();
-
-
-            if (!data.ok) {
-
-                showToast(
-                    data.error ||
-                    "Command failed"
-                );
-
-            } else {
-
-                showToast(
-                    name
-                        .replaceAll("-", " ")
-                        .toUpperCase()
-                    + " EXECUTED"
-                );
-
-            }
-
-
-        } catch (error) {
-
-            console.error(error);
-
-            showToast(
-                "Laptop connection lost"
-            );
-        }
-    }
-
-
-    // ========================================================
-    // PAGE SWITCHING
-    // ========================================================
-
-    function switchPage(
-        pageName,
-        button
-    ) {
-
-        document
-            .querySelectorAll(".page")
-            .forEach(
-                page => {
-                    page.classList.remove(
-                        "active"
-                    );
-                }
-            );
-
-
-        document
-            .querySelectorAll(".nav-btn")
-            .forEach(
-                navButton => {
-                    navButton.classList.remove(
-                        "active"
-                    );
-                }
-            );
-
-
-        const page =
-            document.getElementById(
-                pageName
-            );
-
-
-        if (page) {
-
-            page.classList.add(
-                "active"
-            );
-        }
-
-
-        if (button) {
-
-            button.classList.add(
-                "active"
-            );
-        }
-
-
-        if (pageName === "system") {
-
-            loadStats();
-        }
-    }
-
-
-    // ========================================================
-    // SYSTEM STATS
-    // ========================================================
-
-    async function loadStats() {
-
-        try {
-
-            const response =
-                await fetch(
-                    "/api/system-stats",
-                    {
-                        cache: "no-store"
-                    }
-                );
-
-
-            const stats =
-                await response.json();
-
-
-            if (!stats.ok) {
-
-                showToast(
-                    "Unable to load system stats"
-                );
-
-                return;
-            }
-
-
-            // CPU
-
-            document
-                .getElementById("cpuValue")
-                .textContent =
-                    stats.cpu.percent + "%";
-
-
-            document
-                .getElementById("cpuMeter")
-                .style.width =
-                    stats.cpu.percent + "%";
-
-
-            // RAM
-
-            document
-                .getElementById("ramValue")
-                .textContent =
-                    stats.memory.percent + "%";
-
-
-            document
-                .getElementById("ramSub")
-                .textContent =
-                    stats.memory.used_gb +
-                    " / " +
-                    stats.memory.total_gb +
-                    " GB";
-
-
-            document
-                .getElementById("ramMeter")
-                .style.width =
-                    stats.memory.percent + "%";
-
-
-            // TEMP
-
-            document
-                .getElementById("tempValue")
-                .textContent =
-                    stats.temperature === null
-                        ? "N/A"
-                        : stats.temperature + "°C";
-
-
-            // DISK
-
-            document
-                .getElementById("diskValue")
-                .textContent =
-                    stats.disk.percent + "%";
-
-
-            document
-                .getElementById("diskSub")
-                .textContent =
-                    stats.disk.free_gb +
-                    " GB free";
-
-
-            document
-                .getElementById("diskMeter")
-                .style.width =
-                    stats.disk.percent + "%";
-
-
-        } catch (error) {
-
-            console.error(error);
-
-            showToast(
-                "Stats connection failed"
-            );
-        }
-    }
-
-
-    // ========================================================
-    // FULLSCREEN
-    // ========================================================
-
-    async function goFullscreen() {
-
-        try {
-
-            if (
-                !document.fullscreenElement
-            ) {
-
-                await document
-                    .documentElement
-                    .requestFullscreen();
-
-                hideFullscreenButton();
-            }
-
-        } catch (error) {
-
-            console.warn(
-                "Fullscreen unavailable:",
-                error
-            );
-        }
-    }
-
-
-    function hideFullscreenButton() {
-
-        const button =
-            document.getElementById(
-                "fullscreenBtn"
-            );
-
-        if (button) {
-
-            button.style.display =
-                "none";
-        }
-    }
-
-
-    function showFullscreenButton() {
-
-        const button =
-            document.getElementById(
-                "fullscreenBtn"
-            );
-
-        if (button) {
-
-            button.style.display =
-                "block";
-        }
-    }
-
-
-    document.addEventListener(
-        "fullscreenchange",
-        () => {
-
-            if (
-                document.fullscreenElement
-            ) {
-
-                hideFullscreenButton();
-
-            } else {
-
-                showFullscreenButton();
-            }
-        }
-    );
-
-
-    // ========================================================
-    // TOAST
-    // ========================================================
-
-    let toastTimer = null;
-
-
-    function showToast(
-        message
-    ) {
-
-        const toast =
-            document.getElementById(
-                "toast"
-            );
-
-
-        toast.textContent =
-            message;
-
-
-        toast.style.opacity =
-            "1";
-
-
-        clearTimeout(
-            toastTimer
-        );
-
-
-        toastTimer =
-            setTimeout(
-                () => {
-
-                    toast.style.opacity =
-                        "0";
-
-                },
-                1800
-            );
-    }
-
-
-    // ========================================================
-    // STARTUP
-    // ========================================================
-
-    window.addEventListener(
-        "load",
-        () => {
-
-            console.log(
-                "Shubham Deck V4 ready"
-            );
-
-        }
-    );
-
-
-</script>
-
-
+    </aside>
+
+    <main class="main-content">
+        <section class="cam-section">
+            <div class="cam-wrapper glass-panel" style="padding: 0; box-shadow: none;">
+                <div class="hud">
+                    <div class="hud-top">
+                        <div class="rec-indicator"><div class="rec-dot"></div> <span id="cam-status">LINK ACTIVE</span></div>
+                        <div class="hud-mono">OPTICAL.FEED // 10.124.165.12</div>
+                    </div>
+                    <div class="crosshair"></div>
+                    <div class="hud-bottom">
+                        <div id="hud-time" class="hud-mono">00:00:00.000</div>
+                        <div class="hud-mono">SYS.V5 <i data-lucide="wifi" class="icon-sm" style="margin-left: 8px;"></i></div>
+                    </div>
+                </div>
+                <img id="camera-feed" src="/video_feed" alt="Camera Feed">
+                
+                <!-- Fallback when camera is offline -->
+                <div id="camera-offline" class="camera-offline-state hidden">
+                    <i data-lucide="camera-off" style="width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
+                    <div>OPTICAL LINK SEVERED</div>
+                    <button class="btn btn-secondary mt-3" onclick="reconnectCamera()" style="font-size: 0.8rem; padding: 8px 16px; flex-direction: row; width: auto;">
+                        <i data-lucide="refresh-cw"></i> REINITIALIZE
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <section class="controls-section glass-panel">
+            <h3 class="section-title">QUICK ACTIONS</h3>
+            <div class="btn-grid">
+                <button class="btn action-btn" data-action="terminal"><i data-lucide="terminal"></i> Terminal</button>
+                <button class="btn action-btn" data-action="vscode"><i data-lucide="code"></i> VS Code</button>
+                <button class="btn action-btn" data-action="screenshot"><i data-lucide="camera"></i> Capture</button>
+                <button class="btn action-btn" data-action="vol_up"><i data-lucide="volume-2"></i> Vol +</button>
+                <button class="btn action-btn" data-action="vol_down"><i data-lucide="volume-1"></i> Vol -</button>
+                <button class="btn action-btn" data-action="lock"><i data-lucide="lock"></i> Lock PC</button>
+            </div>
+            
+            <h3 class="section-title mt-4" style="color: var(--danger);">SYSTEM POWER</h3>
+            <div class="btn-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));">
+                <button class="btn btn-danger action-btn" data-action="reboot" data-confirm="true"><i data-lucide="refresh-cw"></i> Reboot</button>
+                <button class="btn btn-danger action-btn" data-action="shutdown" data-confirm="true"><i data-lucide="power"></i> Shutdown</button>
+            </div>
+        </section>
+    </main>
+
+    <!-- Your existing Lumi JS (will load if exists) -->
     <script src="/static/js/lumi.js"></script>
-</body>
+    <script>
+        // Initialize Icons
+        lucide.createIcons();
 
+        // --- STATE ---
+        let isOffline = false;
+        let actionToConfirm = null;
+
+        // --- DOM ELEMENTS ---
+        const toastContainer = document.getElementById('toast-container');
+        const modalOverlay = document.getElementById('modal-overlay');
+        const camFeed = document.getElementById('camera-feed');
+        const camOffline = document.getElementById('camera-offline');
+
+        // --- NOTIFICATIONS ---
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            
+            const icon = type === 'success' ? '<i data-lucide="check-circle"></i>' : '<i data-lucide="alert-triangle"></i>';
+            toast.innerHTML = `${icon} <span>${message}</span>`;
+            
+            toastContainer.appendChild(toast);
+            lucide.createIcons({ root: toast });
+            
+            setTimeout(() => toast.classList.add('show'), 10);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // --- ACTION HANDLING ---
+        async function triggerAction(action) {
+            try {
+                const res = await fetch('/api/action', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action})
+                });
+                
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(`Executed: ${action.replace('_', ' ').toUpperCase()}`);
+                } else {
+                    showToast(`Failed: ${data.message}`, 'error');
+                }
+            } catch(e) { 
+                showToast('Connection to host lost', 'error');
+                console.error(e); 
+            }
+        }
+
+        document.querySelectorAll('.action-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action = btn.getAttribute('data-action');
+                const requiresConfirm = btn.getAttribute('data-confirm');
+                
+                if (requiresConfirm === 'true') {
+                    openModal(action);
+                } else {
+                    triggerAction(action);
+                }
+            });
+        });
+
+        // --- MODAL LOGIC ---
+        function openModal(action) {
+            actionToConfirm = action;
+            document.getElementById('modal-message').innerText = `Are you sure you want to ${action.toUpperCase()} the system?`;
+            modalOverlay.classList.add('active');
+        }
+
+        function closeModal() {
+            actionToConfirm = null;
+            modalOverlay.classList.remove('active');
+        }
+
+        document.getElementById('modal-confirm-btn').addEventListener('click', () => {
+            if (actionToConfirm) triggerAction(actionToConfirm);
+            closeModal();
+        });
+
+        // --- SYSTEM POLLING ---
+        function updateConnectionStatus(online) {
+            const statusEl = document.getElementById('conn-status');
+            const textEl = document.getElementById('conn-text');
+            
+            if (online && isOffline) {
+                statusEl.className = 'status-indicator online';
+                textEl.innerText = 'SYSTEM ONLINE';
+                isOffline = false;
+            } else if (!online && !isOffline) {
+                statusEl.className = 'status-indicator offline';
+                textEl.innerText = 'CONNECTION LOST';
+                isOffline = true;
+            }
+        }
+
+        async function updateStats() {
+            try {
+                const res = await fetch('/api/system-stats', { signal: AbortSignal.timeout(2000) });
+                if (!res.ok) throw new Error('Network error');
+                
+                const data = await res.json();
+                
+                document.getElementById('cpu-val').innerText = `${data.cpu}%`;
+                document.getElementById('cpu-bar').style.width = `${data.cpu}%`;
+                
+                document.getElementById('ram-val').innerText = `${data.ram}%`;
+                document.getElementById('ram-bar').style.width = `${data.ram}%`;
+                
+                document.getElementById('disk-val').innerText = `${data.disk}%`;
+                document.getElementById('disk-bar').style.width = `${data.disk}%`;
+                
+                document.getElementById('uptime-val').innerText = data.uptime;
+                
+                updateConnectionStatus(true);
+            } catch(e) {
+                updateConnectionStatus(false);
+            }
+        }
+
+        // --- CAMERA FALLBACK ---
+        camFeed.addEventListener('error', () => {
+            camFeed.classList.add('hidden');
+            camOffline.classList.remove('hidden');
+            document.getElementById('cam-status').innerText = 'LINK SEVERED';
+            document.getElementById('cam-status').style.color = 'var(--text-muted)';
+            document.querySelector('.rec-dot').style.display = 'none';
+        });
+
+        function reconnectCamera() {
+            camFeed.src = ''; 
+            setTimeout(() => {
+                camFeed.src = '/video_feed?' + new Date().getTime(); // Bust cache
+                camOffline.classList.add('hidden');
+                camFeed.classList.remove('hidden');
+                
+                document.getElementById('cam-status').innerText = 'LINK ACTIVE';
+                document.getElementById('cam-status').style.color = '#ef4444';
+                document.querySelector('.rec-dot').style.display = 'block';
+            }, 500);
+        }
+
+        // --- TIMERS ---
+        setInterval(updateStats, 2000);
+        updateStats();
+
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('hud-time').innerText = 
+                now.toLocaleTimeString('en-US', { hour12: false }) + '.' + 
+                now.getMilliseconds().toString().padStart(3, '0');
+        }, 47);
+    </script>
+</body>
 </html>
 """
 
+def generate_frames():
+    """Generates camera frames with proper resource cleanup."""
+    cap = cv2.VideoCapture(CAMERA_URL)
+    # Reduce buffer size to minimize latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    
+    try:
+        while True:
+            success, frame = cap.read()
+            if not success:
+                time.sleep(0.5) # Wait before retrying if stream drops
+                continue
+                
+            # Compress for faster network transmission
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if not ret: 
+                continue
+                
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+    finally:
+        # CRITICAL: Release the camera if the client disconnects to prevent memory leaks
+        cap.release()
 
-# ============================================================
-# ROUTES
-# ============================================================
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
 
-@app.get("/")
-def home():
-    return render_template_string(HTML)
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+@app.route('/api/system-stats')
+def system_stats():
+    uptime_sec = time.time() - psutil.boot_time()
+    h = int(uptime_sec // 3600)
+    m = int((uptime_sec % 3600) // 60)
+    
+    try:
+        disk = psutil.disk_usage('/').percent
+    except:
+        disk = 0
 
-@app.get("/health")
-def health():
     return jsonify({
-        "ok": True,
-        "service": "Shubham Deck"
+        "cpu": psutil.cpu_percent(interval=0.1), 
+        "ram": psutil.virtual_memory().percent,
+        "disk": disk,
+        "uptime": f"{h}h {m}m"
     })
 
+@app.route('/api/action', methods=['POST'])
+def handle_action():
+    data = request.get_json() or {}
+    action = data.get('action')
+    
+    # Whitelisted actions
+    actions = {
+        'terminal': ['gnome-terminal'],
+        'vscode': ['code'],
+        'screenshot': ['gnome-screenshot'],
+        'vol_up': ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '+5%'],
+        'vol_down': ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '-5%'],
+        'lock': ['loginctl', 'lock-session'],
+        'reboot': ['systemctl', 'reboot'],
+        'shutdown': ['systemctl', 'poweroff']
+    }
+    
+    if action in actions:
+        try:
+            subprocess.Popen(actions[action], env=os.environ.copy())
+            return jsonify({"status": "success", "action": action})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+            
+    return jsonify({"status": "unknown_action"}), 400
 
-@app.get("/api/system-stats")
-def system_stats():
-
-    try:
-
-        cpu = read_cpu_usage()
-        memory = read_memory()
-        disk = read_disk()
-        temperature = read_temperature()
-        uptime = read_uptime()
-
-        return jsonify({
-            "ok": True,
-            "cpu": {
-                "percent": cpu
-            },
-            "memory": memory,
-            "disk": disk,
-            "temperature": temperature,
-            "uptime": uptime
-        })
-
-    except Exception as exc:
-
-        app.logger.exception(
-            "Failed to read system stats"
-        )
-
-        return jsonify({
-            "ok": False,
-            "error": str(exc)
-        }), 500
-
-
-@app.get("/run/<name>")
-def run_command(name):
-
-    script = COMMANDS.get(name)
-
-    if script is None:
-
-        return jsonify({
-            "ok": False,
-            "error": "Unknown command"
-        }), 404
-
-
-    if not script.exists():
-
-        return jsonify({
-            "ok": False,
-            "error":
-                f"Script not found: {script}"
-        }), 500
-
-
-    if not script.is_file():
-
-        return jsonify({
-            "ok": False,
-            "error":
-                f"Not a file: {script}"
-        }), 500
-
-
-    try:
-
-        subprocess.Popen(
-            [str(script)],
-            cwd=str(SCRIPTS_DIR),
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-
-        return jsonify({
-            "ok": True,
-            "command": name
-        })
-
-
-    except Exception as exc:
-
-        app.logger.exception(
-            "Failed to execute command: %s",
-            name
-        )
-
-        return jsonify({
-            "ok": False,
-            "error": str(exc)
-        }), 500
-
-
-# ============================================================
-# START SERVER
-# ============================================================
-
-if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=False,
-        threaded=True
-    )
+if __name__ == '__main__':
+    # Threaded=True prevents the camera stream from blocking API requests
+    app.run(host='0.0.0.0', port=5000, threaded=True)
