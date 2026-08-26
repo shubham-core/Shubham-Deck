@@ -1,0 +1,11 @@
+# Python
+server/venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+
+# Media & Runtime Data
+logs/
+recordings/
+captures/
