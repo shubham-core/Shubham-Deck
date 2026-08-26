@@ -1,26 +1,85 @@
-# Shubham Deck
+# ⚡ Deck OS Pro
 
-Shubham Deck turns an old Android phone into a custom Stream Deck / Elgato-style touchscreen control panel for a Linux laptop.
+> **A Cyber-Glass Linux command center that transforms an old Android device into a low-latency touchscreen control deck.**
 
-## Architecture
-Android Phone (Browser) -> Flask Web Dashboard (Port 5000) -> Linux Shell Scripts -> Laptop Applications / System Actions
+[![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux\&logoColor=black)](#)
+[![Python](https://img.shields.io/badge/Backend-Python-3776AB?logo=python\&logoColor=white)](#)
+[![Flask](https://img.shields.io/badge/API-Flask-000000?logo=flask\&logoColor=white)](#)
+[![OpenCV](https://img.shields.io/badge/Vision-OpenCV-5C3EE8?logo=opencv\&logoColor=white)](#)
 
-## Features
-- App Launcher: Open VS Code, Brave, WhatsApp Web, GitHub, Files, and Terminal.
-- System Controls: Mute, Volume Up/Down, Lock Screen, and save Screenshots.
-- System Monitoring: Live CPU, RAM, Disk, CPU Temperature, and Uptime statistics.
-- Mobile-First UI: Dark theme, fullscreen support, large touch targets, and press animations.
+## 🚀 Overview
 
-## Running the Server
-The application runs as a systemd user service. Do not run app.py manually.
+**Deck OS Pro** is a custom Linux-based touchscreen control interface built to repurpose an old Android phone as a **remote workstation command center**.
 
-To check status:
-systemctl --user status shubham-deck.service
+It combines a **Cyber-Glass HUD**, real-time system telemetry, IP-camera streaming, Linux automation, and persistent background services into a unified control surface.
 
-To restart:
-systemctl --user restart shubham-deck.service
+### Core Stack
 
-Access the deck on your phone at: http://<LAPTOP-IP>:5000/
+* 🪟 **Cyber-Glass UI** — glassmorphism, HUD overlays, dynamic system indicators
+* 📡 **V5 Vision Pipeline** — Android IP camera → OpenCV → threaded Flask stream
+* 📊 **Real-Time Telemetry** — CPU, RAM, storage and uptime via `psutil`
+* ⚙️ **Macro Automation** — app launching, volume control, lock, reboot and shutdown
+* 🤖 **Lumi** — interactive visual interface companion
+* 🧵 **Concurrent Backend** — threaded Flask architecture for non-blocking operations
+* 🚀 **Persistent Runtime** — `systemd --user` background service
 
-## Future Roadmap
-- V5 (AI Vision): Transform the phone camera into a smart local IP camera with real-time AI object/person detection.
+## 🧠 Architecture
+
+```text
+Android Device
+     │
+     ├── Touchscreen
+     └── IP Camera
+            │
+            ▼
+     ┌───────────────┐
+     │   Flask API   │
+     └───────┬───────┘
+             │
+      ┌──────┼──────────┐
+      ▼      ▼          ▼
+   Telemetry Vision   Automation
+    psutil  OpenCV    Linux Commands
+      │      │          │
+      └──────┴──────────┘
+             ▼
+       Cyber-Glass UI
+```
+
+## 🔥 Key Capabilities
+
+| System               | Function                              |
+| -------------------- | ------------------------------------- |
+| **Control Deck**     | Touch-based workstation control       |
+| **Telemetry Engine** | Live hardware/system monitoring       |
+| **Vision Pipeline**  | Low-latency network video + HUD       |
+| **Macro Engine**     | One-tap Linux automation              |
+| **System Layer**     | Lock, reboot, shutdown, audio control |
+| **Service Layer**    | Persistent `systemd` execution        |
+
+## 🛠️ Technology
+
+**Frontend:** HTML5 · CSS3 · JavaScript · Glassmorphism UI
+**Backend:** Python · Flask · Threading
+**Vision:** OpenCV · IP/MJPEG Streaming
+**System:** `psutil` · PulseAudio · Linux · systemd
+**Infrastructure:** Git · GitHub · Local Network
+
+## 🎯 Design Philosophy
+
+**Repurpose → Integrate → Automate**
+
+Instead of letting an old smartphone become e-waste, Deck OS Pro turns its **touchscreen, camera and network stack** into a software-defined workstation control surface.
+
+## 📈 Future Expansion
+
+GPU telemetry · OBS controls · Media controls · Network monitoring · WebSockets · Custom macros · Plugin architecture · Multi-device control
+
+---
+
+<p align="center">
+
+**DECK OS PRO**
+`Cyber-Glass • Computer Vision • Linux Automation • Remote Control`
+
+</p>
