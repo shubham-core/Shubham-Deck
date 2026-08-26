@@ -1,26 +1,224 @@
 from flask import Flask, jsonify, render_template_string
 from pathlib import Path
 import subprocess
+import shutil
+import time
 
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURATION
+# PROJECT PATHS
 # ============================================================
 
-BASE_DIR = Path("/home/shubham/phone-deck")
+PROJECT_DIR = Path("/home/shubham/Desktop/Shubham-Deck")
+SCRIPTS_DIR = PROJECT_DIR / "scripts"
+
+# ============================================================
+# COMMAND REGISTRY
+# ============================================================
 
 COMMANDS = {
-    "vscode": BASE_DIR / "vscode.sh",
-    "brave": BASE_DIR / "brave.sh",
-    "whatsapp": BASE_DIR / "whatsapp.sh",
-    "github": BASE_DIR / "github.sh",
-    "files": BASE_DIR / "files.sh",
-    "terminal": BASE_DIR / "terminal.sh",
+    # Apps
+    "vscode": SCRIPTS_DIR / "vscode.sh",
+    "brave": SCRIPTS_DIR / "brave.sh",
+    "whatsapp": SCRIPTS_DIR / "whatsapp.sh",
+    "github": SCRIPTS_DIR / "github.sh",
+    "files": SCRIPTS_DIR / "files.sh",
+    "terminal": SCRIPTS_DIR / "terminal.sh",
+
+    # System
+    "mute": SCRIPTS_DIR / "mute.sh",
+    "volume-up": SCRIPTS_DIR / "volume-up.sh",
+    "volume-down": SCRIPTS_DIR / "volume-down.sh",
+    "lock": SCRIPTS_DIR / "lock.sh",
+    "screenshot": SCRIPTS_DIR / "screenshot.sh",
 }
 
+
 # ============================================================
-# DASHBOARD HTML
+# HELPERS
+# ============================================================
+
+def read_cpu_usage():
+    """
+    Calculate CPU usage from /proc/stat without requiring
+    extra packages.
+    """
+    def sample():
+        with open("/proc/stat", "r", encoding="utf-8") as f:
+            line = f.readline()
+
+        values = list(map(int, line.split()[1:]))
+
+        user, nice, system, idle, iowait, irq, softirq, steal = values[:8]
+
+        idle_total = idle + iowait
+        total = sum(values)
+
+        return total, idle_total
+
+    total1, idle1 = sample()
+    time.sleep(0.12)
+    total2, idle2 = sample()
+
+    total_delta = total2 - total1
+    idle_delta = idle2 - idle1
+
+    if total_delta <= 0:
+        return 0.0
+
+    usage = (1 - (idle_delta / total_delta)) * 100
+
+    return round(max(0.0, min(100.0, usage)), 1)
+
+
+def read_memory():
+    """
+    Return RAM usage information from /proc/meminfo.
+    """
+    values = {}
+
+    with open("/proc/meminfo", "r", encoding="utf-8") as f:
+        for line in f:
+            key, value = line.split(":", 1)
+            values[key] = int(value.strip().split()[0])
+
+    total_kb = values.get("MemTotal", 0)
+    available_kb = values.get("MemAvailable", 0)
+
+    used_kb = total_kb - available_kb
+
+    if total_kb <= 0:
+        return {
+            "used_gb": 0,
+            "total_gb": 0,
+            "percent": 0,
+        }
+
+    used_gb = used_kb / 1024 / 1024
+    total_gb = total_kb / 1024 / 1024
+    percent = (used_kb / total_kb) * 100
+
+    return {
+        "used_gb": round(used_gb, 1),
+        "total_gb": round(total_gb, 1),
+        "percent": round(percent, 1),
+    }
+
+
+def read_disk():
+    """
+    Return root filesystem usage.
+    """
+    total, used, free = shutil.disk_usage("/")
+
+    total_gb = total / 1024 / 1024 / 1024
+    used_gb = used / 1024 / 1024 / 1024
+    free_gb = free / 1024 / 1024 / 1024
+
+    percent = (used / total) * 100 if total else 0
+
+    return {
+        "used_gb": round(used_gb, 1),
+        "total_gb": round(total_gb, 1),
+        "free_gb": round(free_gb, 1),
+        "percent": round(percent, 1),
+    }
+
+
+def read_temperature():
+    """
+    Try to obtain CPU temperature from lm-sensors/sysfs.
+    Returns None when unavailable.
+    """
+
+    # First try lm-sensors.
+    sensors = shutil.which("sensors")
+
+    if sensors:
+        try:
+            result = subprocess.run(
+                [sensors],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+
+            text = result.stdout
+
+            for line in text.splitlines():
+                if "Package id 0:" in line:
+                    parts = line.split()
+
+                    for part in parts:
+                        if part.endswith("°C"):
+                            cleaned = part.replace("+", "").replace("°C", "")
+                            try:
+                                return round(float(cleaned), 1)
+                            except ValueError:
+                                pass
+
+                if "Tctl:" in line or "Tdie:" in line:
+                    parts = line.split()
+
+                    for part in parts:
+                        if part.endswith("°C"):
+                            cleaned = part.replace("+", "").replace("°C", "")
+                            try:
+                                return round(float(cleaned), 1)
+                            except ValueError:
+                                pass
+
+        except Exception:
+            pass
+
+    # Fallback: thermal-zone files.
+    thermal_root = Path("/sys/class/thermal")
+
+    if thermal_root.exists():
+        for zone in thermal_root.glob("thermal_zone*/temp"):
+            try:
+                raw = int(zone.read_text().strip())
+                temp = raw / 1000
+
+                if -20 <= temp <= 120:
+                    return round(temp, 1)
+            except Exception:
+                continue
+
+    return None
+
+
+def read_uptime():
+    """
+    Read Linux uptime.
+    """
+    try:
+        seconds = float(
+            Path("/proc/uptime").read_text().split()[0]
+        )
+
+        seconds = int(seconds)
+
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+
+        if days:
+            return f"{days}d {hours}h {minutes}m"
+
+        if hours:
+            return f"{hours}h {minutes}m"
+
+        return f"{minutes}m"
+
+    except Exception:
+        return "Unknown"
+
+
+# ============================================================
+# DASHBOARD
 # ============================================================
 
 HTML = r"""
@@ -28,6 +226,7 @@ HTML = r"""
 <html lang="en">
 
 <head>
+
     <meta charset="UTF-8">
 
     <meta
@@ -41,7 +240,7 @@ HTML = r"""
         "
     >
 
-    <meta name="theme-color" content="#080808">
+    <meta name="theme-color" content="#070707">
 
     <link
         rel="manifest"
@@ -52,9 +251,9 @@ HTML = r"""
 
     <style>
 
-        /* =====================================================
-           GLOBAL
-           ===================================================== */
+        /* ====================================================
+           RESET
+           ==================================================== */
 
         * {
             box-sizing: border-box;
@@ -63,13 +262,19 @@ HTML = r"""
 
         html,
         body {
+            margin: 0;
             width: 100%;
             height: 100%;
-            margin: 0;
-            padding: 0;
 
-            background: #080808;
-            color: #ffffff;
+            background:
+                radial-gradient(
+                    circle at 50% -10%,
+                    #202020 0,
+                    #0c0c0c 35%,
+                    #050505 100%
+                );
+
+            color: #fff;
 
             font-family:
                 system-ui,
@@ -90,9 +295,114 @@ HTML = r"""
         }
 
 
-        /* =====================================================
-           FULLSCREEN BUTTON
-           ===================================================== */
+        /* ====================================================
+           DECK
+           ==================================================== */
+
+        .deck {
+            width: 100%;
+            height: 100%;
+
+            max-width: 1200px;
+
+            padding:
+                max(12px, env(safe-area-inset-top))
+                max(12px, env(safe-area-inset-right))
+                max(12px, env(safe-area-inset-bottom))
+                max(12px, env(safe-area-inset-left));
+
+            display: flex;
+            flex-direction: column;
+        }
+
+
+        /* ====================================================
+           TOP BAR
+           ==================================================== */
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            min-height: 52px;
+
+            margin-bottom: 10px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand-mark {
+            width: 36px;
+            height: 36px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            border-radius: 11px;
+
+            background:
+                linear-gradient(
+                    145deg,
+                    #353535,
+                    #181818
+                );
+
+            border: 1px solid #3c3c3c;
+
+            box-shadow:
+                inset 0 1px 0
+                    rgba(255,255,255,.08);
+        }
+
+        .brand-text {
+            font-size: clamp(18px, 4vw, 28px);
+            font-weight: 850;
+            letter-spacing: .8px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            padding: 7px 10px;
+
+            border: 1px solid #252525;
+            border-radius: 999px;
+
+            background: rgba(20,20,20,.8);
+
+            color: #929292;
+
+            font-size: 10px;
+            font-weight: 800;
+
+            letter-spacing: .3px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+
+            border-radius: 50%;
+
+            background: #38e58b;
+
+            box-shadow:
+                0 0 10px
+                rgba(56,229,139,.75);
+        }
+
+
+        /* ====================================================
+           FULLSCREEN
+           ==================================================== */
 
         #fullscreenBtn {
             position: fixed;
@@ -109,130 +419,109 @@ HTML = r"""
 
             z-index: 9999;
 
-            width: 46px;
-            height: 42px;
+            width: 44px;
+            height: 40px;
 
             border: 1px solid #333;
             border-radius: 12px;
 
-            background: rgba(30, 30, 30, 0.92);
-            color: #ffffff;
+            background: rgba(30,30,30,.95);
+            color: white;
 
-            font-size: 21px;
-            font-weight: 700;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            font-size: 20px;
+            font-weight: 800;
 
             cursor: pointer;
 
             box-shadow:
-                0 5px 15px rgba(0, 0, 0, 0.45);
+                0 8px 24px rgba(0,0,0,.4);
 
-            backdrop-filter: blur(8px);
-
-            transition:
-                transform 0.10s ease,
-                background 0.10s ease;
+            backdrop-filter: blur(10px);
         }
 
         #fullscreenBtn:active {
-            transform: scale(0.88);
-            background: #303030;
+            transform: scale(.88);
         }
 
 
-        /* =====================================================
-           MAIN DECK
-           ===================================================== */
+        /* ====================================================
+           NAVIGATION
+           ==================================================== */
 
-        .deck {
-            width: 100%;
-            height: 100%;
+        .nav {
+            display: grid;
 
-            max-width: 1000px;
-            max-height: 1000px;
+            grid-template-columns:
+                repeat(3, 1fr);
 
-            padding:
-                max(14px, env(safe-area-inset-top))
-                max(14px, env(safe-area-inset-right))
-                max(14px, env(safe-area-inset-bottom))
-                max(14px, env(safe-area-inset-left));
+            gap: 7px;
 
+            margin-bottom: 10px;
+        }
+
+        .nav-btn {
+            height: 39px;
+
+            border: 1px solid #252525;
+            border-radius: 11px;
+
+            background: #111;
+
+            color: #777;
+
+            font-size: 11px;
+            font-weight: 850;
+
+            cursor: pointer;
+
+            transition:
+                background .12s ease,
+                color .12s ease,
+                transform .08s ease;
+        }
+
+        .nav-btn.active {
+            color: #fff;
+
+            background:
+                linear-gradient(
+                    145deg,
+                    #292929,
+                    #181818
+                );
+
+            border-color: #454545;
+        }
+
+        .nav-btn:active {
+            transform: scale(.96);
+        }
+
+
+        /* ====================================================
+           PAGE
+           ==================================================== */
+
+        .page {
+            display: none;
+
+            flex: 1;
+
+            min-height: 0;
+        }
+
+        .page.active {
             display: flex;
             flex-direction: column;
         }
 
 
-        /* =====================================================
-           HEADER
-           ===================================================== */
+        /* ====================================================
+           APP / SYSTEM GRID
+           ==================================================== */
 
-        .topbar {
-            min-height: 48px;
-
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-
-            margin-bottom: 12px;
-        }
-
-        .title {
-            font-size: clamp(20px, 4vw, 30px);
-
-            font-weight: 850;
-
-            letter-spacing: 1px;
-
-            user-select: none;
-        }
-
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-
-            padding:
-                7px
-                10px;
-
-            border-radius: 999px;
-
-            background: #151515;
-            border: 1px solid #252525;
-
-            color: #9a9a9a;
-
-            font-size: 11px;
-            font-weight: 700;
-
-            white-space: nowrap;
-
-            user-select: none;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-
-            border-radius: 50%;
-
-            background: #35df86;
-
-            box-shadow:
-                0 0 9px rgba(53, 223, 134, 0.8);
-        }
-
-
-        /* =====================================================
-           BUTTON GRID
-           ===================================================== */
-
-        .grid {
+        .deck-grid {
             flex: 1;
-
             min-height: 0;
 
             display: grid;
@@ -240,296 +529,542 @@ HTML = r"""
             grid-template-columns:
                 repeat(3, minmax(0, 1fr));
 
-            gap: 12px;
+            grid-template-rows:
+                repeat(2, minmax(0, 1fr));
+
+            gap: 10px;
         }
 
 
-        /* =====================================================
-           STREAM DECK BUTTON
-           ===================================================== */
+        /* ====================================================
+           KEY
+           ==================================================== */
 
         .key {
+            min-width: 0;
+            min-height: 0;
+
+            border: 1px solid #292929;
+            border-radius: 20px;
+
+            background:
+                radial-gradient(
+                    circle at 50% 0%,
+                    rgba(255,255,255,.07),
+                    transparent 42%
+                ),
+                linear-gradient(
+                    145deg,
+                    #191919,
+                    #101010
+                );
+
+            color: white;
+
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+
+            gap: 9px;
+
+            padding: 9px;
+
+            cursor: pointer;
+
+            box-shadow:
+                inset 0 1px 0
+                    rgba(255,255,255,.035),
+
+                0 7px 18px
+                    rgba(0,0,0,.27);
+
+            transition:
+                transform .09s ease,
+                background .09s ease,
+                border-color .09s ease;
+        }
+
+        .key:active,
+        .key.pressed {
+            transform: scale(.94);
+
+            border-color: #656565;
+
+            background:
+                radial-gradient(
+                    circle at 50% 30%,
+                    rgba(255,255,255,.13),
+                    transparent 50%
+                ),
+                #222;
+        }
+
+
+        /* ====================================================
+           APP ICON
+           ==================================================== */
+
+        .icon {
+            width:
+                clamp(48px, 9vw, 82px);
+
+            height:
+                clamp(48px, 9vw, 82px);
+
+            object-fit: contain;
+
+            pointer-events: none;
+            user-select: none;
+
+            filter:
+                drop-shadow(
+                    0 5px 10px
+                    rgba(0,0,0,.4)
+                );
+        }
+
+
+        /* ====================================================
+           EMOJI ICON
+           ==================================================== */
+
+        .emoji-icon {
+            font-size:
+                clamp(40px, 8vw, 68px);
+
+            line-height: 1;
+
+            pointer-events: none;
+            user-select: none;
+        }
+
+
+        /* ====================================================
+           LABEL
+           ==================================================== */
+
+        .label {
+            font-size:
+                clamp(11px, 2.15vw, 16px);
+
+            font-weight: 800;
+
+            line-height: 1.1;
+
+            text-align: center;
+
+            pointer-events: none;
+            user-select: none;
+        }
+
+
+        /* ====================================================
+           SYSTEM STATS
+           ==================================================== */
+
+        .stats-wrap {
+            flex: 1;
+
+            min-height: 0;
+
+            display: flex;
+            flex-direction: column;
+
+            gap: 10px;
+        }
+
+        .stats-grid {
+            display: grid;
+
+            grid-template-columns:
+                repeat(2, minmax(0, 1fr));
+
+            gap: 10px;
+
+            flex: 1;
+        }
+
+        .stat-card {
+            border: 1px solid #292929;
+            border-radius: 18px;
+
+            background:
+                linear-gradient(
+                    145deg,
+                    #191919,
+                    #101010
+                );
+
+            padding: 15px;
+
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+
+            min-height: 0;
+        }
+
+        .stat-head {
+            color: #777;
+
+            font-size: 10px;
+
+            font-weight: 850;
+
+            letter-spacing: 1px;
+        }
+
+        .stat-value {
+            font-size:
+                clamp(21px, 5vw, 36px);
+
+            font-weight: 850;
+        }
+
+        .stat-sub {
+            color: #777;
+
+            font-size: 10px;
+
+            font-weight: 700;
+        }
+
+        .meter {
+            width: 100%;
+            height: 7px;
+
+            border-radius: 99px;
+
+            overflow: hidden;
+
+            background: #252525;
+        }
+
+        .meter > span {
+            display: block;
+
+            height: 100%;
+
+            width: 0%;
+
+            background:
+                linear-gradient(
+                    90deg,
+                    #777,
+                    #ddd
+                );
+
+            border-radius: inherit;
+
+            transition:
+                width .35s ease;
+        }
+
+        .refresh-btn {
+            min-height: 43px;
+
+            border: 1px solid #303030;
+            border-radius: 13px;
+
+            background: #171717;
+
+            color: #fff;
+
+            font-weight: 850;
+
+            cursor: pointer;
+        }
+
+
+        /* ====================================================
+           AI VISION PAGE
+           ==================================================== */
+
+        .vision-shell {
+            flex: 1;
+
+            min-height: 0;
+
+            display: flex;
+            flex-direction: column;
+
+            gap: 10px;
+        }
+
+        .camera-panel {
             position: relative;
 
-            min-width: 0;
+            flex: 1;
+
             min-height: 0;
 
             border:
                 1px solid #292929;
 
-            border-radius: 21px;
+            border-radius: 20px;
 
             background:
                 radial-gradient(
-                    circle at 50% 5%,
-                    rgba(255, 255, 255, 0.075),
-                    transparent 43%
-                ),
-                linear-gradient(
-                    145deg,
-                    #181818,
-                    #111111
+                    circle,
+                    #171717,
+                    #0b0b0b
                 );
 
-            color: #ffffff;
-
             display: flex;
-            flex-direction: column;
-
             align-items: center;
             justify-content: center;
 
-            gap: 10px;
+            overflow: hidden;
+        }
 
-            padding: 10px;
+        .camera-placeholder {
+            text-align: center;
+            color: #777;
+        }
+
+        .camera-icon {
+            font-size: 56px;
+            margin-bottom: 10px;
+        }
+
+        .camera-title {
+            color: #aaa;
+            font-weight: 850;
+        }
+
+        .camera-sub {
+            margin-top: 5px;
+            font-size: 11px;
+            color: #555;
+        }
+
+        .vision-controls {
+            display: grid;
+
+            grid-template-columns:
+                repeat(2, 1fr);
+
+            gap: 8px;
+        }
+
+        .vision-btn {
+            min-height: 43px;
+
+            border:
+                1px solid #2a2a2a;
+
+            border-radius: 13px;
+
+            background: #171717;
+
+            color: #fff;
+
+            font-weight: 800;
 
             cursor: pointer;
-
-            user-select: none;
-
-            box-shadow:
-                inset 0 1px 0
-                    rgba(255, 255, 255, 0.035),
-
-                0 8px 20px
-                    rgba(0, 0, 0, 0.28);
-
-            transition:
-                transform 0.09s ease,
-                background 0.09s ease,
-                border-color 0.09s ease,
-                box-shadow 0.09s ease;
         }
 
-        .key:hover {
-            border-color: #414141;
-        }
 
-        .key:active,
-        .key.pressed {
-            transform: scale(0.94);
+        /* ====================================================
+           TOAST
+           ==================================================== */
 
-            border-color: #606060;
+        #toast {
+            position: fixed;
+
+            left: 50%;
+            bottom: 25px;
+
+            transform:
+                translateX(-50%);
+
+            z-index: 20000;
+
+            max-width: 88%;
+
+            padding:
+                10px
+                14px;
+
+            border:
+                1px solid #3a3a3a;
+
+            border-radius: 12px;
 
             background:
-                radial-gradient(
-                    circle at 50% 30%,
-                    rgba(255, 255, 255, 0.13),
-                    transparent 52%
-                ),
-                #202020;
+                rgba(25,25,25,.96);
 
-            box-shadow:
-                inset 0 0 20px
-                    rgba(255, 255, 255, 0.045),
+            color: #fff;
 
-                0 3px 8px
-                    rgba(0, 0, 0, 0.35);
-        }
-
-
-        /* =====================================================
-           ICONS
-           ===================================================== */
-
-        .icon {
-            width: clamp(50px, 10vw, 88px);
-            height: clamp(50px, 10vw, 88px);
-
-            object-fit: contain;
-
-            user-select: none;
-            pointer-events: none;
-
-            filter:
-                drop-shadow(
-                    0 4px 8px
-                    rgba(0, 0, 0, 0.4)
-                );
-        }
-
-
-        /* =====================================================
-           BUTTON LABEL
-           ===================================================== */
-
-        .label {
-            font-size:
-                clamp(12px, 2.25vw, 17px);
-
-            line-height: 1.1;
+            font-size: 12px;
 
             font-weight: 750;
 
-            letter-spacing: 0.2px;
+            box-shadow:
+                0 10px 30px
+                rgba(0,0,0,.45);
 
-            text-align: center;
+            opacity: 0;
 
-            user-select: none;
             pointer-events: none;
+
+            transition:
+                opacity .2s ease;
         }
 
 
-        /* =====================================================
-           FOOTER
-           ===================================================== */
-
-        .footer {
-            min-height: 25px;
-
-            display: flex;
-            align-items: flex-end;
-            justify-content: center;
-
-            color: #4e4e4e;
-
-            font-size: 10px;
-            font-weight: 600;
-
-            letter-spacing: 0.5px;
-
-            user-select: none;
-        }
-
-
-        /* =====================================================
-           SMALL PHONES
-           ===================================================== */
+        /* ====================================================
+           RESPONSIVE
+           ==================================================== */
 
         @media (max-width: 600px) {
 
-            .deck {
-                padding:
-                    max(10px, env(safe-area-inset-top))
-                    max(10px, env(safe-area-inset-right))
-                    max(10px, env(safe-area-inset-bottom))
-                    max(10px, env(safe-area-inset-left));
-            }
-
-            .grid {
-                gap: 9px;
+            .deck-grid {
+                gap: 8px;
             }
 
             .key {
-                border-radius: 17px;
+                border-radius: 16px;
             }
 
-            .label {
-                font-size: 13px;
-            }
-        }
-
-
-        /* =====================================================
-           VERY SMALL PHONES
-           ===================================================== */
-
-        @media (max-width: 380px) {
-
-            .grid {
-                gap: 7px;
+            .stats-grid {
+                gap: 8px;
             }
 
-            .key {
-                border-radius: 14px;
-            }
-
-            .icon {
-                width: 45px;
-                height: 45px;
-            }
-
-            .label {
-                font-size: 11px;
+            .stat-card {
+                border-radius: 15px;
+                padding: 12px;
             }
         }
-
-
-        /* =====================================================
-           LANDSCAPE
-           ===================================================== */
 
         @media (orientation: landscape) {
 
             .deck {
-                max-width: 1150px;
+                max-width: 1200px;
             }
 
-            .grid {
-                grid-template-columns:
-                    repeat(3, minmax(0, 1fr));
+            .deck-grid {
+                gap: 9px;
             }
 
             .icon {
-                width: clamp(48px, 9vh, 78px);
-                height: clamp(48px, 9vh, 78px);
+                width:
+                    clamp(45px, 8vh, 75px);
+
+                height:
+                    clamp(45px, 8vh, 75px);
+            }
+
+            .emoji-icon {
+                font-size:
+                    clamp(38px, 7vh, 60px);
             }
         }
 
+
     </style>
+
 </head>
 
 
 <body>
 
 
-    <!-- =======================================================
-         FULLSCREEN BUTTON
-         ======================================================= -->
+<!-- ============================================================
+     FULLSCREEN BUTTON
+     ============================================================ -->
 
-    <button
-        id="fullscreenBtn"
-        onclick="goFullscreen()"
-        aria-label="Enter fullscreen"
-        title="Fullscreen"
+<button
+    id="fullscreenBtn"
+    onclick="goFullscreen()"
+    aria-label="Enter fullscreen"
+>
+    ⛶
+</button>
+
+
+<!-- ============================================================
+     MAIN
+     ============================================================ -->
+
+<main class="deck">
+
+
+    <!-- HEADER -->
+
+    <header class="topbar">
+
+        <div class="brand">
+
+            <div class="brand-mark">
+                ⚡
+            </div>
+
+            <div class="brand-text">
+                SHUBHAM DECK
+            </div>
+
+        </div>
+
+
+        <div class="status">
+
+            <span class="status-dot"></span>
+
+            ONLINE
+
+        </div>
+
+    </header>
+
+
+    <!-- ========================================================
+         NAV
+         ======================================================== -->
+
+    <nav class="nav">
+
+        <button
+            class="nav-btn active"
+            onclick="switchPage('apps', this)"
+        >
+            APPS
+        </button>
+
+        <button
+            class="nav-btn"
+            onclick="switchPage('system', this)"
+        >
+            SYSTEM
+        </button>
+
+        <button
+            class="nav-btn"
+            onclick="switchPage('vision', this)"
+        >
+            AI VISION
+        </button>
+
+    </nav>
+
+
+    <!-- ========================================================
+         APPS
+         ======================================================== -->
+
+    <section
+        id="apps"
+        class="page active"
     >
-        ⛶
-    </button>
 
+        <div class="deck-grid">
 
-    <!-- =======================================================
-         MAIN DECK
-         ======================================================= -->
-
-    <main class="deck">
-
-
-        <!-- ===================================================
-             HEADER
-             =================================================== -->
-
-        <header class="topbar">
-
-            <div class="title">
-                MY DECK
-            </div>
-
-            <div class="status">
-
-                <span class="status-dot"></span>
-
-                LAPTOP ONLINE
-
-            </div>
-
-        </header>
-
-
-        <!-- ===================================================
-             BUTTON GRID
-             =================================================== -->
-
-        <section class="grid">
-
-
-            <!-- VS CODE -->
 
             <button
                 class="key"
-                type="button"
                 onclick="runCommand('vscode', this)"
             >
-
                 <img
                     class="icon"
                     src="/static/icons/vscode.png"
@@ -539,18 +1074,13 @@ HTML = r"""
                 <span class="label">
                     VS Code
                 </span>
-
             </button>
 
 
-            <!-- BRAVE -->
-
             <button
                 class="key"
-                type="button"
                 onclick="runCommand('brave', this)"
             >
-
                 <img
                     class="icon"
                     src="/static/icons/brave.png"
@@ -560,18 +1090,13 @@ HTML = r"""
                 <span class="label">
                     Brave
                 </span>
-
             </button>
 
 
-            <!-- WHATSAPP -->
-
             <button
                 class="key"
-                type="button"
                 onclick="runCommand('whatsapp', this)"
             >
-
                 <img
                     class="icon"
                     src="/static/icons/whatsapp.ico"
@@ -581,18 +1106,13 @@ HTML = r"""
                 <span class="label">
                     WhatsApp
                 </span>
-
             </button>
 
 
-            <!-- GITHUB -->
-
             <button
                 class="key"
-                type="button"
                 onclick="runCommand('github', this)"
             >
-
                 <img
                     class="icon"
                     src="/static/icons/github.svg"
@@ -602,18 +1122,13 @@ HTML = r"""
                 <span class="label">
                     GitHub
                 </span>
-
             </button>
 
 
-            <!-- FILES -->
-
             <button
                 class="key"
-                type="button"
                 onclick="runCommand('files', this)"
             >
-
                 <img
                     class="icon"
                     src="/static/icons/files.svg"
@@ -623,18 +1138,13 @@ HTML = r"""
                 <span class="label">
                     Files
                 </span>
-
             </button>
 
 
-            <!-- TERMINAL -->
-
             <button
                 class="key"
-                type="button"
                 onclick="runCommand('terminal', this)"
             >
-
                 <img
                     class="icon"
                     src="/static/icons/terminal.svg"
@@ -644,303 +1154,679 @@ HTML = r"""
                 <span class="label">
                     Terminal
                 </span>
-
             </button>
 
 
-        </section>
+        </div>
+
+    </section>
 
 
-        <!-- ===================================================
-             FOOTER
-             =================================================== -->
+    <!-- ========================================================
+         SYSTEM
+         ======================================================== -->
 
-        <footer class="footer">
-            SHUBHAM DECK • V2
-        </footer>
+    <section
+        id="system"
+        class="page"
+    >
 
-
-    </main>
-
-
-    <!-- =======================================================
-         JAVASCRIPT
-         ======================================================= -->
-
-    <script>
+        <div class="stats-wrap">
 
 
-        // ======================================================
-        // RUN LAPTOP COMMAND
-        // ======================================================
+            <!-- SYSTEM CONTROL BUTTONS -->
 
-        async function runCommand(name, button) {
+            <div class="deck-grid">
 
-            // Visual press effect
-            button.classList.add("pressed");
+                <button
+                    class="key"
+                    onclick="runCommand('mute', this)"
+                >
+                    <span class="emoji-icon">
+                        🔇
+                    </span>
 
-            window.setTimeout(() => {
-                button.classList.remove("pressed");
-            }, 140);
+                    <span class="label">
+                        Mute
+                    </span>
+                </button>
 
 
-            try {
+                <button
+                    class="key"
+                    onclick="runCommand('volume-up', this)"
+                >
+                    <span class="emoji-icon">
+                        🔊
+                    </span>
 
-                const response =
-                    await fetch(
-                        "/run/" + encodeURIComponent(name),
-                        {
-                            method: "GET",
-                            cache: "no-store"
-                        }
+                    <span class="label">
+                        Volume +
+                    </span>
+                </button>
+
+
+                <button
+                    class="key"
+                    onclick="runCommand('volume-down', this)"
+                >
+                    <span class="emoji-icon">
+                        🔉
+                    </span>
+
+                    <span class="label">
+                        Volume -
+                    </span>
+                </button>
+
+
+                <button
+                    class="key"
+                    onclick="runCommand('lock', this)"
+                >
+                    <span class="emoji-icon">
+                        🔒
+                    </span>
+
+                    <span class="label">
+                        Lock
+                    </span>
+                </button>
+
+
+                <button
+                    class="key"
+                    onclick="runCommand('screenshot', this)"
+                >
+                    <span class="emoji-icon">
+                        📸
+                    </span>
+
+                    <span class="label">
+                        Screenshot
+                    </span>
+                </button>
+
+
+                <button
+                    class="key"
+                    onclick="loadStats()"
+                >
+                    <span class="emoji-icon">
+                        📊
+                    </span>
+
+                    <span class="label">
+                        Refresh Stats
+                    </span>
+                </button>
+
+            </div>
+
+
+            <!-- LIVE STATS -->
+
+            <div class="stats-grid">
+
+
+                <div class="stat-card">
+
+                    <div class="stat-head">
+                        CPU
+                    </div>
+
+                    <div
+                        id="cpuValue"
+                        class="stat-value"
+                    >
+                        --
+                    </div>
+
+                    <div class="meter">
+                        <span
+                            id="cpuMeter"
+                        ></span>
+                    </div>
+
+                </div>
+
+
+                <div class="stat-card">
+
+                    <div class="stat-head">
+                        RAM
+                    </div>
+
+                    <div
+                        id="ramValue"
+                        class="stat-value"
+                    >
+                        --
+                    </div>
+
+                    <div
+                        id="ramSub"
+                        class="stat-sub"
+                    >
+                        --
+                    </div>
+
+                    <div class="meter">
+                        <span
+                            id="ramMeter"
+                        ></span>
+                    </div>
+
+                </div>
+
+
+                <div class="stat-card">
+
+                    <div class="stat-head">
+                        CPU TEMP
+                    </div>
+
+                    <div
+                        id="tempValue"
+                        class="stat-value"
+                    >
+                        --
+                    </div>
+
+                    <div class="stat-sub">
+                        CPU temperature
+                    </div>
+
+                </div>
+
+
+                <div class="stat-card">
+
+                    <div class="stat-head">
+                        DISK
+                    </div>
+
+                    <div
+                        id="diskValue"
+                        class="stat-value"
+                    >
+                        --
+                    </div>
+
+                    <div
+                        id="diskSub"
+                        class="stat-sub"
+                    >
+                        --
+                    </div>
+
+                    <div class="meter">
+                        <span
+                            id="diskMeter"
+                        ></span>
+                    </div>
+
+                </div>
+
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- ========================================================
+         AI VISION
+         ======================================================== -->
+
+    <section
+        id="vision"
+        class="page"
+    >
+
+        <div class="vision-shell">
+
+
+            <div class="camera-panel">
+
+                <div class="camera-placeholder">
+
+                    <div class="camera-icon">
+                        📷
+                    </div>
+
+                    <div class="camera-title">
+                        AI VISION
+                    </div>
+
+                    <div class="camera-sub">
+                        Camera pipeline coming next
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <div class="vision-controls">
+
+                <button
+                    class="vision-btn"
+                    onclick="showToast('Camera setup coming next')"
+                >
+                    START CAMERA
+                </button>
+
+                <button
+                    class="vision-btn"
+                    onclick="showToast('AI detection coming next')"
+                >
+                    OBJECT DETECTION
+                </button>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+</main>
+
+
+<!-- TOAST -->
+
+<div id="toast"></div>
+
+
+<script>
+
+
+    // ========================================================
+    // RUN LAPTOP COMMAND
+    // ========================================================
+
+    async function runCommand(
+        name,
+        button
+    ) {
+
+        if (button) {
+
+            button.classList.add(
+                "pressed"
+            );
+
+            setTimeout(
+                () => {
+                    button.classList.remove(
+                        "pressed"
                     );
+                },
+                140
+            );
+        }
 
 
-                const data =
-                    await response.json();
+        try {
 
-
-                if (!data.ok) {
-
-                    console.error(
-                        "Command failed:",
-                        data.error
-                    );
-
-                    showToast(
-                        data.error ||
-                        "Command failed"
-                    );
-                }
-
-
-            } catch (error) {
-
-                console.error(
-                    "Connection error:",
-                    error
+            const response =
+                await fetch(
+                    "/run/" +
+                    encodeURIComponent(name),
+                    {
+                        method: "GET",
+                        cache: "no-store"
+                    }
                 );
+
+
+            const data =
+                await response.json();
+
+
+            if (!data.ok) {
 
                 showToast(
-                    "Laptop connection lost"
+                    data.error ||
+                    "Command failed"
                 );
+
+            } else {
+
+                showToast(
+                    name
+                        .replaceAll("-", " ")
+                        .toUpperCase()
+                    + " EXECUTED"
+                );
+
             }
+
+
+        } catch (error) {
+
+            console.error(error);
+
+            showToast(
+                "Laptop connection lost"
+            );
         }
+    }
 
 
-        // ======================================================
-        // FULLSCREEN
-        // ======================================================
+    // ========================================================
+    // PAGE SWITCHING
+    // ========================================================
 
-        async function goFullscreen() {
+    function switchPage(
+        pageName,
+        button
+    ) {
 
-            try {
-
-                if (!document.fullscreenElement) {
-
-                    await document
-                        .documentElement
-                        .requestFullscreen();
-
-                    hideFullscreenButton();
-                }
-
-            } catch (error) {
-
-                console.warn(
-                    "Fullscreen unavailable:",
-                    error
-                );
-
-            }
-        }
-
-
-        // ======================================================
-        // FULLSCREEN STATE
-        // ======================================================
-
-        function hideFullscreenButton() {
-
-            const button =
-                document.getElementById(
-                    "fullscreenBtn"
-                );
-
-            if (button) {
-                button.style.display = "none";
-            }
-        }
-
-
-        function showFullscreenButton() {
-
-            const button =
-                document.getElementById(
-                    "fullscreenBtn"
-                );
-
-            if (button) {
-                button.style.display = "flex";
-            }
-        }
-
-
-        document.addEventListener(
-            "fullscreenchange",
-            () => {
-
-                if (document.fullscreenElement) {
-
-                    hideFullscreenButton();
-
-                } else {
-
-                    showFullscreenButton();
-
-                }
-
-            }
-        );
-
-
-        // ======================================================
-        // SMALL TOAST MESSAGE
-        // ======================================================
-
-        function showToast(message) {
-
-            let toast =
-                document.getElementById(
-                    "deckToast"
-                );
-
-
-            if (!toast) {
-
-                toast =
-                    document.createElement(
-                        "div"
+        document
+            .querySelectorAll(".page")
+            .forEach(
+                page => {
+                    page.classList.remove(
+                        "active"
                     );
-
-                toast.id = "deckToast";
-
-                toast.style.position =
-                    "fixed";
-
-                toast.style.left = "50%";
-
-                toast.style.bottom = "28px";
-
-                toast.style.transform =
-                    "translateX(-50%)";
-
-                toast.style.zIndex = "10000";
-
-                toast.style.padding =
-                    "10px 15px";
-
-                toast.style.borderRadius =
-                    "12px";
-
-                toast.style.background =
-                    "rgba(30,30,30,.94)";
-
-                toast.style.border =
-                    "1px solid #3a3a3a";
-
-                toast.style.color =
-                    "#ffffff";
-
-                toast.style.fontSize =
-                    "13px";
-
-                toast.style.fontWeight =
-                    "700";
-
-                toast.style.boxShadow =
-                    "0 8px 25px rgba(0,0,0,.4)";
-
-                toast.style.pointerEvents =
-                    "none";
-
-                document.body.appendChild(
-                    toast
-                );
-            }
-
-
-            toast.textContent = message;
-
-            toast.style.opacity = "1";
-
-
-            window.clearTimeout(
-                toast._timer
+                }
             );
 
 
-            toast._timer =
-                window.setTimeout(
-                    () => {
+        document
+            .querySelectorAll(".nav-btn")
+            .forEach(
+                navButton => {
+                    navButton.classList.remove(
+                        "active"
+                    );
+                }
+            );
 
-                        toast.style.opacity =
-                            "0";
 
-                    },
-                    2200
-                );
+        const page =
+            document.getElementById(
+                pageName
+            );
+
+
+        if (page) {
+
+            page.classList.add(
+                "active"
+            );
         }
 
 
-        // ======================================================
-        // PREVENT DOUBLE-TAP ZOOM
-        // ======================================================
+        if (button) {
 
-        let lastTouchEnd = 0;
-
-        document.addEventListener(
-            "touchend",
-            (event) => {
-
-                const now =
-                    Date.now();
-
-                if (
-                    now - lastTouchEnd <= 300
-                ) {
-
-                    event.preventDefault();
-
-                }
-
-                lastTouchEnd = now;
-
-            },
-            {
-                passive: false
-            }
-        );
+            button.classList.add(
+                "active"
+            );
+        }
 
 
-        // ======================================================
-        // PAGE READY
-        // ======================================================
+        if (pageName === "system") {
 
-        window.addEventListener(
-            "load",
-            () => {
+            loadStats();
+        }
+    }
 
-                console.log(
-                    "Shubham Deck ready"
+
+    // ========================================================
+    // SYSTEM STATS
+    // ========================================================
+
+    async function loadStats() {
+
+        try {
+
+            const response =
+                await fetch(
+                    "/api/system-stats",
+                    {
+                        cache: "no-store"
+                    }
                 );
 
+
+            const stats =
+                await response.json();
+
+
+            if (!stats.ok) {
+
+                showToast(
+                    "Unable to load system stats"
+                );
+
+                return;
             }
+
+
+            // CPU
+
+            document
+                .getElementById("cpuValue")
+                .textContent =
+                    stats.cpu.percent + "%";
+
+
+            document
+                .getElementById("cpuMeter")
+                .style.width =
+                    stats.cpu.percent + "%";
+
+
+            // RAM
+
+            document
+                .getElementById("ramValue")
+                .textContent =
+                    stats.memory.percent + "%";
+
+
+            document
+                .getElementById("ramSub")
+                .textContent =
+                    stats.memory.used_gb +
+                    " / " +
+                    stats.memory.total_gb +
+                    " GB";
+
+
+            document
+                .getElementById("ramMeter")
+                .style.width =
+                    stats.memory.percent + "%";
+
+
+            // TEMP
+
+            document
+                .getElementById("tempValue")
+                .textContent =
+                    stats.temperature === null
+                        ? "N/A"
+                        : stats.temperature + "°C";
+
+
+            // DISK
+
+            document
+                .getElementById("diskValue")
+                .textContent =
+                    stats.disk.percent + "%";
+
+
+            document
+                .getElementById("diskSub")
+                .textContent =
+                    stats.disk.free_gb +
+                    " GB free";
+
+
+            document
+                .getElementById("diskMeter")
+                .style.width =
+                    stats.disk.percent + "%";
+
+
+        } catch (error) {
+
+            console.error(error);
+
+            showToast(
+                "Stats connection failed"
+            );
+        }
+    }
+
+
+    // ========================================================
+    // FULLSCREEN
+    // ========================================================
+
+    async function goFullscreen() {
+
+        try {
+
+            if (
+                !document.fullscreenElement
+            ) {
+
+                await document
+                    .documentElement
+                    .requestFullscreen();
+
+                hideFullscreenButton();
+            }
+
+        } catch (error) {
+
+            console.warn(
+                "Fullscreen unavailable:",
+                error
+            );
+        }
+    }
+
+
+    function hideFullscreenButton() {
+
+        const button =
+            document.getElementById(
+                "fullscreenBtn"
+            );
+
+        if (button) {
+
+            button.style.display =
+                "none";
+        }
+    }
+
+
+    function showFullscreenButton() {
+
+        const button =
+            document.getElementById(
+                "fullscreenBtn"
+            );
+
+        if (button) {
+
+            button.style.display =
+                "block";
+        }
+    }
+
+
+    document.addEventListener(
+        "fullscreenchange",
+        () => {
+
+            if (
+                document.fullscreenElement
+            ) {
+
+                hideFullscreenButton();
+
+            } else {
+
+                showFullscreenButton();
+            }
+        }
+    );
+
+
+    // ========================================================
+    // TOAST
+    // ========================================================
+
+    let toastTimer = null;
+
+
+    function showToast(
+        message
+    ) {
+
+        const toast =
+            document.getElementById(
+                "toast"
+            );
+
+
+        toast.textContent =
+            message;
+
+
+        toast.style.opacity =
+            "1";
+
+
+        clearTimeout(
+            toastTimer
         );
 
-    </script>
+
+        toastTimer =
+            setTimeout(
+                () => {
+
+                    toast.style.opacity =
+                        "0";
+
+                },
+                1800
+            );
+    }
+
+
+    // ========================================================
+    // STARTUP
+    // ========================================================
+
+    window.addEventListener(
+        "load",
+        () => {
+
+            console.log(
+                "Shubham Deck V4 ready"
+            );
+
+        }
+    );
+
+
+</script>
+
 
 </body>
+
 </html>
 """
 
@@ -951,51 +1837,87 @@ HTML = r"""
 
 @app.get("/")
 def home():
-    """Return the Stream Deck dashboard."""
     return render_template_string(HTML)
 
 
 @app.get("/health")
 def health():
-    """Simple connection test."""
     return jsonify({
         "ok": True,
         "service": "Shubham Deck"
     })
 
 
+@app.get("/api/system-stats")
+def system_stats():
+
+    try:
+
+        cpu = read_cpu_usage()
+        memory = read_memory()
+        disk = read_disk()
+        temperature = read_temperature()
+        uptime = read_uptime()
+
+        return jsonify({
+            "ok": True,
+            "cpu": {
+                "percent": cpu
+            },
+            "memory": memory,
+            "disk": disk,
+            "temperature": temperature,
+            "uptime": uptime
+        })
+
+    except Exception as exc:
+
+        app.logger.exception(
+            "Failed to read system stats"
+        )
+
+        return jsonify({
+            "ok": False,
+            "error": str(exc)
+        }), 500
+
+
 @app.get("/run/<name>")
 def run_command(name):
-    """Safely execute one of the predefined launcher scripts."""
 
     script = COMMANDS.get(name)
 
-    # Unknown command
     if script is None:
+
         return jsonify({
             "ok": False,
             "error": "Unknown command"
         }), 404
 
-    # Missing script
+
     if not script.exists():
+
         return jsonify({
             "ok": False,
-            "error": f"Launcher not found: {script}"
+            "error":
+                f"Script not found: {script}"
         }), 500
 
-    # Not executable
+
     if not script.is_file():
+
         return jsonify({
             "ok": False,
-            "error": f"Launcher is not a file: {script}"
+            "error":
+                f"Not a file: {script}"
         }), 500
+
 
     try:
 
         subprocess.Popen(
             [str(script)],
-            cwd=str(BASE_DIR),
+            cwd=str(SCRIPTS_DIR),
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
@@ -1006,10 +1928,11 @@ def run_command(name):
             "command": name
         })
 
+
     except Exception as exc:
 
         app.logger.exception(
-            "Failed to launch %s",
+            "Failed to execute command: %s",
             name
         )
 
