@@ -2,10 +2,20 @@
 
 > **A Cyber-Glass Linux command center that transforms an old Android device into a low-latency touchscreen control deck.**
 
-[![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux\&logoColor=black)](#)
-[![Python](https://img.shields.io/badge/Backend-Python-3776AB?logo=python\&logoColor=white)](#)
-[![Flask](https://img.shields.io/badge/API-Flask-000000?logo=flask\&logoColor=white)](#)
-[![OpenCV](https://img.shields.io/badge/Vision-OpenCV-5C3EE8?logo=opencv\&logoColor=white)](#)
+<p align="center">
+  <a href="assets/shubham-deck-demo.gif">
+    <img src="assets/shubham-deck-demo.gif" alt="Deck OS Pro — Touchscreen Linux Control Dashboard Demo" width="800px" />
+  </a>
+  <br>
+  <em>Live Demo: Mobile touchscreen control panel streaming hardware metrics and executing Linux shell workflows</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black" alt="Linux" />
+  <img src="https://img.shields.io/badge/Backend-Python-3776AB?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/API-Flask-000000?logo=flask&logoColor=white" alt="Flask" />
+  <img src="https://img.shields.io/badge/Vision-OpenCV-5C3EE8?logo=opencv&logoColor=white" alt="OpenCV" />
+</p>
 
 ## 🚀 Overview
 
